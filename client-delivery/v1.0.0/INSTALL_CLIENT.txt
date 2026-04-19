@@ -1,0 +1,18 @@
+Cafe POS - Client Installation (Windows)
+
+Package version: 1.0.0
+Installer file: CafePOS-v1.0.0-setup.exe
+
+Steps:
+1. Double-click CafePOS-v1.0.0-setup.exe
+2. If Windows SmartScreen appears, click More info -> Run anyway
+3. Follow setup wizard and complete installation
+4. Launch "Cafe POS" from Desktop or Start Menu
+
+First run notes:
+- The app runs fully offline.
+- Keep regular backups from Reports -> Data Ops.
+- If restore is used, restart the app after restore completes.
+
+Support:
+- If installation fails due to permissions, run installer as Administrator.

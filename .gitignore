@@ -19,6 +19,10 @@ dist/
 release/
 *.spec
 
+# Client delivery binaries (docs stay tracked)
+client-delivery/**/*.exe
+client-delivery/**/*.zip
+
 # Local editor/system files
 .vscode/
 .idea/

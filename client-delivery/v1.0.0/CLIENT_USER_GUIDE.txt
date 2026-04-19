@@ -1,0 +1,127 @@
+Cafe POS - Client User Guide
+Version: 1.0.0
+
+This guide explains how to use the full software in daily operations.
+
+1. First Launch
+1. Install using CafePOS-v1.0.0-setup.exe.
+2. Open Cafe POS from Desktop or Start Menu.
+3. The app works fully offline.
+4. Main tabs: Billing, Inventory, Purchases, Expenses, Reports.
+
+2. Billing (Daily Counter Use)
+1. Go to Billing tab.
+2. Search item by name or use Cigarette Quick Add buttons.
+3. Set Qty and click Add to Cart.
+4. In cart, use + Qty, - Qty, Remove Selected, or Clear Cart if needed.
+5. Click Generate Bill (Ctrl+Enter) to complete sale.
+6. If printing fails, retry when prompted.
+
+3. Inventory (Items and Stock)
+1. Go to Inventory tab.
+2. Add item with Name, Category, Selling Price, Cost Price, Opening Stock, Reorder Level.
+3. Click Add Item.
+4. Use Refresh Inventory after updates.
+5. Use Export CSV when needed.
+6. Sensitive actions may require Admin PIN:
+   - Update Price
+   - Manual Stock Adjust
+   - Delete Item
+
+4. Purchases (Supplier Stock Inward)
+1. Go to Purchases tab.
+2. Enter Supplier, choose Item, Qty, Cost Price, optional Notes.
+3. Click Add Line for multiple items.
+4. Click Save Purchase.
+5. Use date filters (Today, Last 7 Days, This Month, Custom, Apply) for history.
+6. Use Export CSV for purchase records.
+7. Modify Selected Purchase requires admin permission.
+
+5. Expenses (Daily Bookkeeping)
+1. Go to Expenses tab.
+2. Select Type, enter Amount and Notes.
+3. Click Add Expense.
+4. Use date filters to view specific period.
+5. Double-click Type/Amount/Notes in table to edit inline.
+
+6. Reports (Owner and Control Center)
+Reports has three sections:
+
+A) Overview
+1. Set From/To date and use quick filters.
+2. Click Refresh Reports.
+3. Review KPI cards:
+   - Sales
+   - COGS
+   - Gross Profit
+   - Purchases
+   - Expenses
+   - Fixed Cost/Day
+   - Realistic Daily Profit
+4. Check Sales Trend and Top Selling Items.
+
+B) Stock and Audit
+1. Review Low Stock table for restocking decisions.
+2. Check Stock Movement Ledger for stock history.
+3. Review Audit Log for sensitive activity history.
+4. Export Audit CSV/XLSX if needed.
+
+C) Data Ops
+1. Access and Closing:
+   - Choose Role (cashier/admin)
+   - Run Close Day (Ctrl+L)
+2. Backup and Restore:
+   - Backup Now
+   - Export DB Backup
+   - Restore DB Backup
+3. Backup Automation:
+   - Enable scheduled backup
+   - Set interval
+   - Save Backup Schedule
+4. Monthly Fixed Costs:
+   - Enter Rent, Salaries, Maintenance, Electricity
+   - Save Fixed Costs
+5. Reporting Exports:
+   - Export CSV
+   - Export XLSX
+   - Export All CSV
+   - Print Summary
+   - Open after export toggle
+
+7. Role and Security
+1. Roles: cashier and admin.
+2. Admin operations require PIN confirmation.
+3. Keep Admin PIN private.
+
+8. Daily Closing Recommended Routine
+1. Complete all pending bills.
+2. Enter all purchases and expenses.
+3. Open Reports -> Overview and verify daily numbers.
+4. Open Reports -> Stock and Audit and review low stock and audit log.
+5. Open Reports -> Data Ops:
+   - Run Close Day
+   - Run Backup Now
+   - Export required reports if needed
+
+9. Backup and Restore Best Practice
+1. Take backup at least daily.
+2. Keep backup copies in another folder or drive.
+3. After restore, restart app.
+
+10. Quick Troubleshooting
+1. App not opening:
+   - Re-run installer as Administrator.
+2. Export not saving:
+   - Choose a folder with write permission (Desktop/Documents).
+3. Printer issue:
+   - Sale is saved first; retry print.
+4. Wrong data seen:
+   - Check Audit Log and date filters first.
+
+11. Support Note
+If any error appears repeatedly, share:
+1. Screenshot of error
+2. What action was being done
+3. Approximate time of issue
+
+End of Guide
