@@ -15,11 +15,12 @@ python main.py
 
 ## Screenshots
 
-![Billing flow](docs/screenshots/billing.svg)
-![Inventory management](docs/screenshots/inventory.svg)
-![Reports overview](docs/screenshots/overview.svg)
-![Stock and audit](docs/screenshots/stock-audit.svg)
-![Data Ops](docs/screenshots/data-ops.svg)
+![Billing flow](docs/screenshots/billing.png)
+![Inventory management](docs/screenshots/inventory.png)
+![Purchases workflow](docs/screenshots/purchases.png)
+![Expenses workflow](docs/screenshots/expenses.png)
+![Reports overview](docs/screenshots/reports-overview.png)
+![Reports data ops](docs/screenshots/reports-data-ops.png)
 
 ## 1. Project Goal
 
