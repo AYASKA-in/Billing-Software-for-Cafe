@@ -13,6 +13,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Screenshots
+
+![Billing flow](docs/screenshots/billing.svg)
+![Inventory management](docs/screenshots/inventory.svg)
+![Reports overview](docs/screenshots/overview.svg)
+![Stock and audit](docs/screenshots/stock-audit.svg)
+![Data Ops](docs/screenshots/data-ops.svg)
+
 ## 1. Project Goal
 
 Build a practical, fully offline Windows desktop app for cafe operations with:
