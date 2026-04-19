@@ -1,0 +1,20 @@
+{
+  "shop_name": "Cafe Name",
+  "currency": "INR",
+  "language": "en",
+  "admin": {
+    "default_pin": "1234"
+  },
+  "billing": {
+    "invoice_prefix": "CAFE",
+    "cart_autosave_seconds": 5
+  },
+  "printer": {
+    "enabled": true,
+    "name": "USB Thermal Printer"
+  },
+  "backup": {
+    "enabled": true,
+    "directory": "data/backups"
+  }
+}

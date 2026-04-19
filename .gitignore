@@ -1,0 +1,26 @@
+# Python virtual environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local runtime data and exports
+*.db
+*.sqlite
+*.sqlite3
+*.log
+reports_*.csv
+cafe_backup_*.db
+data/backups/
+data/printed_bills/
+
+# Build and release artifacts
+build/
+dist/
+release/
+*.spec
+
+# Local editor/system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
