@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     category_id INTEGER,
+    item_kind TEXT NOT NULL DEFAULT 'sellable' CHECK (item_kind IN ('sellable', 'ingredient')),
+    costing_mode TEXT NOT NULL DEFAULT 'manual' CHECK (costing_mode IN ('manual', 'recipe')),
+    unit_name TEXT NOT NULL DEFAULT 'pcs',
+    is_stock_tracked INTEGER NOT NULL DEFAULT 1 CHECK (is_stock_tracked IN (0, 1)),
     selling_price REAL NOT NULL CHECK (selling_price > 0),
     cost_price REAL NOT NULL DEFAULT 0 CHECK (cost_price >= 0),
     size_type TEXT,
@@ -39,6 +43,26 @@ CREATE TABLE IF NOT EXISTS sale_items (
     line_total REAL NOT NULL CHECK (line_total >= 0),
     FOREIGN KEY (sale_id) REFERENCES sales (id) ON DELETE CASCADE,
     FOREIGN KEY (item_id) REFERENCES items (id)
+);
+
+CREATE TABLE IF NOT EXISTS recipes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sellable_item_id INTEGER NOT NULL UNIQUE,
+    yield_qty REAL NOT NULL DEFAULT 1 CHECK (yield_qty > 0),
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (sellable_item_id) REFERENCES items (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS recipe_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipe_id INTEGER NOT NULL,
+    ingredient_item_id INTEGER NOT NULL,
+    quantity_used REAL NOT NULL CHECK (quantity_used > 0),
+    waste_percent REAL NOT NULL DEFAULT 0 CHECK (waste_percent >= 0),
+    UNIQUE(recipe_id, ingredient_item_id),
+    FOREIGN KEY (recipe_id) REFERENCES recipes (id) ON DELETE CASCADE,
+    FOREIGN KEY (ingredient_item_id) REFERENCES items (id)
 );
 
 CREATE TABLE IF NOT EXISTS purchases (
@@ -85,6 +109,27 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS daily_overheads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    overhead_date TEXT NOT NULL UNIQUE,
+    gas_cost REAL NOT NULL DEFAULT 0 CHECK (gas_cost >= 0),
+    labor_cost REAL NOT NULL DEFAULT 0 CHECK (labor_cost >= 0),
+    misc_cost REAL NOT NULL DEFAULT 0 CHECK (misc_cost >= 0),
+    expected_units REAL NOT NULL DEFAULT 0 CHECK (expected_units >= 0),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS costing_exceptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exception_type TEXT NOT NULL,
+    item_id INTEGER,
+    sale_id INTEGER,
+    details TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (item_id) REFERENCES items (id),
+    FOREIGN KEY (sale_id) REFERENCES sales (id)
+);
+
 CREATE TABLE IF NOT EXISTS backups_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     backup_path TEXT NOT NULL,
@@ -120,6 +165,9 @@ CREATE INDEX IF NOT EXISTS idx_expenses_spent_at ON expenses (spent_at);
 CREATE INDEX IF NOT EXISTS idx_stock_movements_moved_at ON stock_movements (moved_at);
 CREATE INDEX IF NOT EXISTS idx_items_size_type ON items (size_type);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at);
+CREATE INDEX IF NOT EXISTS idx_items_kind ON items (item_kind);
+CREATE INDEX IF NOT EXISTS idx_recipe_lines_recipe_id ON recipe_lines (recipe_id);
+CREATE INDEX IF NOT EXISTS idx_costing_exceptions_created_at ON costing_exceptions (created_at);
 
 INSERT OR IGNORE INTO categories (name) VALUES
     ('Food'),

@@ -1,0 +1,91 @@
+Cafe POS - Client User Guide
+Version: 1.1.0
+
+Purpose:
+This guide helps cashier, manager, and owner use the software safely in day-to-day operations.
+
+Application Type:
+Offline desktop app for Windows.
+
+Main Tabs:
+Billing, Inventory, Purchases, Expenses, Reports.
+
+What is new in 1.1.0:
+1. Ingredient and recipe-based costing is supported for sellable items.
+2. Ingredient stock is consumed automatically at checkout for recipe-backed items.
+3. Daily variable overhead can be entered and used in recipe cost calculations.
+4. Costing exceptions (for example, recipe fallback usage) are visible in Reports.
+5. Inventory list shows Kind and Costing columns for quick audit by admin.
+
+--------------------------------------------------
+1. Installation and First-Time Setup
+--------------------------------------------------
+1. Run CafePOS-v1.1.0-setup.exe.
+2. If SmartScreen appears, click More Info, then Run Anyway.
+3. Complete setup and launch the app.
+4. On first open, verify:
+   - Shop details are correct.
+   - Printer is connected (if used).
+   - Required items exist in inventory.
+5. Recommended first-day setup:
+   - Add all stock items in Inventory.
+   - Set proper reorder levels.
+   - Set monthly fixed costs in Reports > Data Ops.
+   - Configure scheduled backup interval.
+
+--------------------------------------------------
+2. Inventory Setup for Recipe Costing
+--------------------------------------------------
+1. For raw materials, add item with Kind = Ingredient.
+2. For finished products, set Kind = Sellable.
+3. For recipe-driven products, set Costing = Recipe and configure recipe lines from Inventory Actions.
+4. Verify Kind and Costing columns in the inventory table for each relevant item.
+
+Best Practice:
+1. Keep ingredient units consistent (for example ml, g, pcs).
+2. Keep ingredient stock updated through purchases.
+
+--------------------------------------------------
+3. Billing Workflow (Counter Operations)
+--------------------------------------------------
+1. Open Billing tab.
+2. Search item or use quick buttons.
+3. Set quantity and click Add to Cart.
+4. Use cart controls:
+   - + Qty
+   - - Qty
+   - Remove Selected
+   - Clear Cart
+5. Confirm total and click Generate Bill (Ctrl+Enter).
+
+Notes for recipe items:
+1. Recipe-backed items validate ingredient availability at checkout.
+2. Ingredient stock is reduced automatically when sale completes.
+
+--------------------------------------------------
+4. Reports and Costing Controls
+--------------------------------------------------
+A) Overview
+1. Set date range and refresh.
+2. Review Sales, COGS, Gross Profit, Expenses, and Realistic Daily Profit.
+
+B) Stock and Audit
+1. Review low stock table.
+2. Review stock movement ledger.
+3. Review audit log.
+4. Review Costing Exceptions table for missing recipe fallback cases.
+
+C) Data Ops
+1. Enter Daily Variable Overhead values (gas, labor, misc, expected units).
+2. Save daily overhead using admin PIN.
+3. Continue using backup/restore and export functions as before.
+
+--------------------------------------------------
+5. Daily Checklist
+--------------------------------------------------
+1. Record purchases and expenses on same day.
+2. Verify low stock warnings.
+3. Review costing exceptions before closing day.
+4. Run close day and backup at end of shift.
+
+End of Guide

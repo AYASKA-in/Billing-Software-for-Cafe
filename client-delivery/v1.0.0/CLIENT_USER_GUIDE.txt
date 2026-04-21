@@ -1,54 +1,153 @@
 Cafe POS - Client User Guide
 Version: 1.0.0
 
-This guide explains how to use the full software in daily operations.
+Purpose:
+This guide helps cashier, manager, and owner use the software safely in day-to-day operations.
 
-1. First Launch
-1. Install using CafePOS-v1.0.0-setup.exe.
-2. Open Cafe POS from Desktop or Start Menu.
-3. The app works fully offline.
-4. Main tabs: Billing, Inventory, Purchases, Expenses, Reports.
+Application Type:
+Offline desktop app for Windows.
 
-2. Billing (Daily Counter Use)
-1. Go to Billing tab.
-2. Search item by name or use Cigarette Quick Add buttons.
-3. Set Qty and click Add to Cart.
-4. In cart, use + Qty, - Qty, Remove Selected, or Clear Cart if needed.
-5. Click Generate Bill (Ctrl+Enter) to complete sale.
-6. If printing fails, retry when prompted.
+Main Tabs:
+Billing, Inventory, Purchases, Expenses, Reports.
 
-3. Inventory (Items and Stock)
-1. Go to Inventory tab.
-2. Add item with Name, Category, Selling Price, Cost Price, Opening Stock, Reorder Level.
-3. Click Add Item.
-4. Use Refresh Inventory after updates.
-5. Use Export CSV when needed.
-6. Sensitive actions may require Admin PIN:
-   - Update Price
-   - Manual Stock Adjust
-   - Delete Item
+--------------------------------------------------
+1. Installation and First-Time Setup
+--------------------------------------------------
+1. Run CafePOS-v1.0.0-setup.exe.
+2. If SmartScreen appears, click More Info, then Run Anyway.
+3. Complete setup and launch the app.
+4. On first open, verify:
+   - Shop details are correct.
+   - Printer is connected (if used).
+   - Required items exist in inventory.
+5. Recommended first-day setup:
+   - Add all stock items in Inventory.
+   - Set proper reorder levels.
+   - Set monthly fixed costs in Reports > Data Ops.
+   - Configure scheduled backup interval.
 
-4. Purchases (Supplier Stock Inward)
-1. Go to Purchases tab.
-2. Enter Supplier, choose Item, Qty, Cost Price, optional Notes.
-3. Click Add Line for multiple items.
-4. Click Save Purchase.
-5. Use date filters (Today, Last 7 Days, This Month, Custom, Apply) for history.
-6. Use Export CSV for purchase records.
-7. Modify Selected Purchase requires admin permission.
+Important:
+Keep one person responsible for admin PIN and Data Ops controls.
 
-5. Expenses (Daily Bookkeeping)
-1. Go to Expenses tab.
-2. Select Type, enter Amount and Notes.
-3. Click Add Expense.
-4. Use date filters to view specific period.
-5. Double-click Type/Amount/Notes in table to edit inline.
+--------------------------------------------------
+2. Roles and Permissions
+--------------------------------------------------
+1. Cashier:
+   - Daily billing and basic entry actions.
+   - Can perform normal non-sensitive operations.
+2. Admin:
+   - Required for sensitive operations such as price change, manual stock adjust, deletes, and purchase modifications.
+3. Use Reports > Data Ops > Access and Closing to switch role.
 
-6. Reports (Owner and Control Center)
-Reports has three sections:
+Security Rules:
+1. Do not share admin PIN widely.
+2. Do not keep admin role active at counter all day.
+3. Switch back to cashier role after admin tasks.
+
+--------------------------------------------------
+3. Billing Workflow (Counter Operations)
+--------------------------------------------------
+Goal: fast and error-free customer billing.
+
+Steps:
+1. Open Billing tab.
+2. Search item or use cigarette quick buttons.
+3. Set quantity and click Add to Cart.
+4. Use cart controls:
+   - + Qty
+   - - Qty
+   - Remove Selected
+   - Clear Cart
+5. Confirm total and click Generate Bill (Ctrl+Enter).
+
+Tips:
+1. If wrong item selected, remove before bill generation.
+2. If printer fails, retry prompt appears after successful sale save.
+3. Never close app abruptly during active billing.
+
+--------------------------------------------------
+4. Inventory Management
+--------------------------------------------------
+Use Inventory tab to maintain product master and stock controls.
+
+Add New Item:
+1. Enter Name.
+2. Choose Category.
+3. Enter Selling Price and Cost Price.
+4. Enter Opening Stock and Reorder Level.
+5. Click Add Item.
+
+Routine Actions:
+1. Refresh Inventory after changes.
+2. Export CSV for external review.
+3. Review low stock items in Reports.
+
+Admin-Protected Actions:
+1. Update Price
+2. Manual Stock Adjust
+3. Delete Item
+
+Best Practice:
+Only adjust stock manually for physical mismatches, and always provide meaningful reason notes.
+
+--------------------------------------------------
+5. Purchases Workflow (Stock Inward)
+--------------------------------------------------
+Use Purchases tab when new stock arrives.
+
+Create Purchase:
+1. Enter Supplier name.
+2. Select Item.
+3. Enter Qty and Cost Price.
+4. Add optional Notes.
+5. Click Add Line for each item.
+6. Click Save Purchase.
+
+View Past Purchases:
+1. Use date filters:
+   - Today
+   - Last 7 Days
+   - This Month
+   - Custom + Apply
+2. Use Export CSV for audit/accounting.
+
+Edit Purchase:
+1. Select existing purchase.
+2. Click Modify Selected Purchase (Admin PIN required).
+3. Update lines and save.
+
+Important:
+Purchase edits affect stock movement history and should be done carefully.
+
+--------------------------------------------------
+6. Expenses Workflow (Daily Bookkeeping)
+--------------------------------------------------
+Use Expenses tab for non-stock spending entries.
+
+Add Expense:
+1. Select Type.
+2. Enter Amount.
+3. Enter Notes.
+4. Click Add Expense.
+
+Edit Expense:
+1. In Recent Expenses table, double-click Type, Amount, or Notes.
+2. Save inline changes.
+
+Filter and Export:
+1. Use date range filters.
+2. Export CSV for accountant handoff.
+
+Best Practice:
+Record expenses same day to avoid end-of-week data backlog.
+
+--------------------------------------------------
+7. Reports Module (Owner Control Center)
+--------------------------------------------------
+Reports has three sub-tabs:
 
 A) Overview
-1. Set From/To date and use quick filters.
+1. Set date range and quick filters.
 2. Click Refresh Reports.
 3. Review KPI cards:
    - Sales
@@ -56,72 +155,126 @@ A) Overview
    - Gross Profit
    - Purchases
    - Expenses
-   - Fixed Cost/Day
+   - Fixed Cost / Day
    - Realistic Daily Profit
 4. Check Sales Trend and Top Selling Items.
 
 B) Stock and Audit
-1. Review Low Stock table for restocking decisions.
-2. Check Stock Movement Ledger for stock history.
-3. Review Audit Log for sensitive activity history.
-4. Export Audit CSV/XLSX if needed.
+1. Low Stock:
+   - Plan replenishment for near-empty SKUs.
+2. Stock Movement Ledger:
+   - Validate every stock increase/decrease reason.
+3. Audit Log:
+   - Review sensitive actions by role and timestamp.
+4. Export Audit CSV/XLSX for record retention.
 
 C) Data Ops
 1. Access and Closing:
-   - Choose Role (cashier/admin)
-   - Run Close Day (Ctrl+L)
+   - Role switch
+   - Close Day (Ctrl+L)
 2. Backup and Restore:
    - Backup Now
    - Export DB Backup
    - Restore DB Backup
 3. Backup Automation:
-   - Enable scheduled backup
+   - Enable schedule
    - Set interval
    - Save Backup Schedule
 4. Monthly Fixed Costs:
-   - Enter Rent, Salaries, Maintenance, Electricity
+   - Rent, Salaries, Maintenance, Electricity
    - Save Fixed Costs
 5. Reporting Exports:
    - Export CSV
    - Export XLSX
    - Export All CSV
    - Print Summary
-   - Open after export toggle
+   - Open after export
 
-7. Role and Security
-1. Roles: cashier and admin.
-2. Admin operations require PIN confirmation.
-3. Keep Admin PIN private.
+--------------------------------------------------
+8. Daily Operations Checklist
+--------------------------------------------------
+Start of Day:
+1. Open app and verify item list loads.
+2. Confirm printer connection.
+3. Confirm role is cashier for billing counter.
 
-8. Daily Closing Recommended Routine
-1. Complete all pending bills.
-2. Enter all purchases and expenses.
-3. Open Reports -> Overview and verify daily numbers.
-4. Open Reports -> Stock and Audit and review low stock and audit log.
-5. Open Reports -> Data Ops:
-   - Run Close Day
-   - Run Backup Now
-   - Export required reports if needed
+During Day:
+1. Perform all sales from Billing tab.
+2. Enter purchases and expenses as they happen.
+3. Monitor stock warnings.
 
-9. Backup and Restore Best Practice
-1. Take backup at least daily.
-2. Keep backup copies in another folder or drive.
-3. After restore, restart app.
+End of Day:
+1. Finish all bills.
+2. Record missed purchases/expenses.
+3. Verify reports in Overview.
+4. Check low stock and audit entries.
+5. Run Close Day.
+6. Run Backup Now.
+7. Export required reports if needed.
 
-10. Quick Troubleshooting
-1. App not opening:
-   - Re-run installer as Administrator.
-2. Export not saving:
-   - Choose a folder with write permission (Desktop/Documents).
-3. Printer issue:
-   - Sale is saved first; retry print.
-4. Wrong data seen:
-   - Check Audit Log and date filters first.
+--------------------------------------------------
+9. Weekly and Monthly Owner Routine
+--------------------------------------------------
+Weekly:
+1. Export All CSV and archive by date.
+2. Review top-selling and low-stock patterns.
+3. Review audit logs for unusual admin actions.
 
-11. Support Note
-If any error appears repeatedly, share:
-1. Screenshot of error
-2. What action was being done
-3. Approximate time of issue
+Monthly:
+1. Update fixed cost values if changed.
+2. Compare realistic daily profit trend.
+3. Validate backup folder health and storage.
+
+--------------------------------------------------
+10. Backup and Restore Policy
+--------------------------------------------------
+1. Keep automatic backups enabled.
+2. Keep at least one extra copy on another drive.
+3. Before restore, verify correct backup file and date.
+4. After restore, restart app immediately.
+5. Do not continue billing in same session after restore.
+
+--------------------------------------------------
+11. Troubleshooting Quick Guide
+--------------------------------------------------
+Issue: App does not open
+1. Run installer as Administrator.
+2. Reopen from Start Menu.
+
+Issue: Export failed
+1. Select Desktop or Documents as destination.
+2. Ensure file is not open in Excel during overwrite.
+
+Issue: Printing failed
+1. Sale is already saved.
+2. Retry print when prompted.
+3. Verify default printer and cable/driver.
+
+Issue: Numbers look incorrect
+1. Check selected date range first.
+2. Verify purchases/expenses were recorded.
+3. Check Stock and Audit tab logs.
+
+Issue: Cannot perform admin action
+1. Switch role to admin.
+2. Enter correct admin PIN.
+
+--------------------------------------------------
+12. Data Accuracy Rules
+--------------------------------------------------
+1. Never share one bill across multiple customers.
+2. Record purchases before selling newly arrived stock.
+3. Avoid manual stock adjust unless physical count mismatch exists.
+4. Always add notes for unusual edits or corrections.
+
+--------------------------------------------------
+13. Support Handoff Format
+--------------------------------------------------
+If reporting an issue, share all below:
+1. Screenshot of the error.
+2. Exact action being performed.
+3. Time and date.
+4. Current role (cashier/admin).
+5. Whether issue occurred before or after restore.
 
 End of Guide

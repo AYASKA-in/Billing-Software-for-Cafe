@@ -77,6 +77,33 @@ class BookkeepingService:
     def list_expenses_between(self, start_date: str, end_date: str, limit: int = 500) -> list[dict]:
         return self.repo.list_expenses_between(start_date=start_date, end_date=end_date, limit=limit)
 
+    def set_daily_overhead(
+        self,
+        overhead_date: str,
+        gas_cost: float,
+        labor_cost: float,
+        misc_cost: float,
+        expected_units: float,
+        admin_pin: str,
+    ) -> None:
+        if not self.verify_admin_pin(admin_pin):
+            raise ValueError("Invalid admin PIN.")
+        if expected_units < 0:
+            raise ValueError("Expected units cannot be negative.")
+        self.repo.upsert_daily_overhead(
+            overhead_date=overhead_date,
+            gas_cost=float(gas_cost),
+            labor_cost=float(labor_cost),
+            misc_cost=float(misc_cost),
+            expected_units=float(expected_units),
+        )
+
+    def get_daily_overhead(self, overhead_date: str) -> dict:
+        return self.repo.get_daily_overhead(overhead_date)
+
+    def list_costing_exceptions(self, limit: int = 200) -> list[dict]:
+        return self.repo.list_costing_exceptions(limit=limit)
+
     def update_expense(self, expense_id: int, expense_type: str, amount: float, notes: str = "") -> None:
         if not expense_type.strip():
             raise ValueError("Expense type is required.")

@@ -90,3 +90,9 @@ class ReportService:
 
     def top_items_between(self, start_date: str, end_date: str, limit: int = 10) -> list[dict]:
         return self.repo.top_selling_items_between(start_date=start_date, end_date=end_date, limit=limit)
+
+    def costing_exceptions(self, limit: int = 200) -> list[dict]:
+        return self.repo.list_costing_exceptions(limit=limit)
+
+    def daily_overhead(self, overhead_date: str) -> dict:
+        return self.repo.get_daily_overhead(overhead_date)

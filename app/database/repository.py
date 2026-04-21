@@ -18,6 +18,7 @@ class Repository:
     def list_items(self, active_only: bool = True) -> list[dict]:
         query = """
             SELECT i.id, i.name, i.category_id, c.name AS category_name,
+                   i.item_kind, i.costing_mode, i.unit_name, i.is_stock_tracked,
                    i.selling_price, i.cost_price, i.size_type,
                    i.stock_quantity, i.reorder_level, i.is_active
             FROM items i
@@ -39,16 +40,27 @@ class Repository:
         size_type: str | None,
         stock_quantity: float,
         reorder_level: float,
+        item_kind: str = "sellable",
+        costing_mode: str = "manual",
+        unit_name: str = "pcs",
+        is_stock_tracked: bool = True,
     ) -> int:
         with self.db.transaction() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO items (name, category_id, selling_price, cost_price, size_type, stock_quantity, reorder_level)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO items (
+                    name, category_id, item_kind, costing_mode, unit_name, is_stock_tracked,
+                    selling_price, cost_price, size_type, stock_quantity, reorder_level
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name.strip(),
                     category_id,
+                    item_kind,
+                    costing_mode,
+                    (unit_name or "pcs").strip() or "pcs",
+                    1 if is_stock_tracked else 0,
                     selling_price,
                     cost_price,
                     size_type,
@@ -90,7 +102,8 @@ class Repository:
         with self.db.connection() as conn:
             row = conn.execute(
                 """
-                SELECT id, name, selling_price, cost_price, stock_quantity, reorder_level, is_active
+                SELECT id, name, item_kind, costing_mode, unit_name, is_stock_tracked,
+                       selling_price, cost_price, stock_quantity, reorder_level, is_active
                 FROM items
                 WHERE id = ?
                 """,
@@ -128,6 +141,232 @@ class Repository:
                 "UPDATE items SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (item_id,),
             )
+
+    def list_ingredients(self, active_only: bool = True) -> list[dict]:
+        query = """
+            SELECT id, name, unit_name, stock_quantity, cost_price, is_active
+            FROM items
+            WHERE item_kind = 'ingredient'
+        """
+        if active_only:
+            query += " AND is_active = 1"
+        query += " ORDER BY name"
+        with self.db.connection() as conn:
+            rows = conn.execute(query).fetchall()
+            return [dict(r) for r in rows]
+
+    def set_item_classification(
+        self,
+        item_id: int,
+        item_kind: str,
+        costing_mode: str,
+        is_stock_tracked: bool,
+        unit_name: str | None = None,
+    ) -> None:
+        with self.db.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE items
+                SET item_kind = ?,
+                    costing_mode = ?,
+                    is_stock_tracked = ?,
+                    unit_name = COALESCE(?, unit_name),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    item_kind,
+                    costing_mode,
+                    1 if is_stock_tracked else 0,
+                    unit_name.strip() if unit_name else None,
+                    item_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Item not found.")
+
+    def upsert_recipe(self, sellable_item_id: int, lines: list[dict], yield_qty: float = 1.0) -> int:
+        if yield_qty <= 0:
+            raise ValueError("Recipe yield must be greater than zero.")
+        with self.db.transaction() as conn:
+            item = conn.execute(
+                "SELECT id, item_kind FROM items WHERE id = ? AND is_active = 1",
+                (sellable_item_id,),
+            ).fetchone()
+            if item is None:
+                raise ValueError("Sellable item not found.")
+            if item["item_kind"] != "sellable":
+                raise ValueError("Recipes can only be assigned to sellable items.")
+
+            row = conn.execute(
+                "SELECT id FROM recipes WHERE sellable_item_id = ?",
+                (sellable_item_id,),
+            ).fetchone()
+            if row is None:
+                cursor = conn.execute(
+                    "INSERT INTO recipes (sellable_item_id, yield_qty, is_active) VALUES (?, ?, 1)",
+                    (sellable_item_id, yield_qty),
+                )
+                recipe_id = int(cursor.lastrowid)
+            else:
+                recipe_id = int(row["id"])
+                conn.execute(
+                    "UPDATE recipes SET yield_qty = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (yield_qty, recipe_id),
+                )
+
+            conn.execute("DELETE FROM recipe_lines WHERE recipe_id = ?", (recipe_id,))
+
+            payload: list[tuple[int, int, float, float]] = []
+            for line in lines:
+                ingredient_item_id = int(line["ingredient_item_id"])
+                qty = float(line["quantity_used"])
+                waste = float(line.get("waste_percent", 0.0))
+                if qty <= 0:
+                    raise ValueError("Recipe quantity must be greater than zero.")
+                ingredient = conn.execute(
+                    "SELECT id, item_kind FROM items WHERE id = ? AND is_active = 1",
+                    (ingredient_item_id,),
+                ).fetchone()
+                if ingredient is None:
+                    raise ValueError("Ingredient item not found.")
+                if ingredient["item_kind"] != "ingredient":
+                    raise ValueError("Recipe ingredients must be ingredient-type items.")
+                payload.append((recipe_id, ingredient_item_id, qty, max(0.0, waste)))
+
+            if not payload:
+                raise ValueError("Recipe requires at least one ingredient line.")
+
+            conn.executemany(
+                """
+                INSERT INTO recipe_lines (recipe_id, ingredient_item_id, quantity_used, waste_percent)
+                VALUES (?, ?, ?, ?)
+                """,
+                payload,
+            )
+
+            conn.execute(
+                "UPDATE items SET costing_mode = 'recipe', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (sellable_item_id,),
+            )
+            return recipe_id
+
+    def get_recipe_for_item(self, sellable_item_id: int) -> dict | None:
+        with self.db.connection() as conn:
+            recipe = conn.execute(
+                """
+                SELECT id, sellable_item_id, yield_qty, is_active, updated_at
+                FROM recipes
+                WHERE sellable_item_id = ? AND is_active = 1
+                """,
+                (sellable_item_id,),
+            ).fetchone()
+            if recipe is None:
+                return None
+
+            lines = conn.execute(
+                """
+                SELECT rl.ingredient_item_id, i.name AS ingredient_name, i.unit_name,
+                       i.stock_quantity, i.cost_price,
+                       rl.quantity_used, rl.waste_percent
+                FROM recipe_lines rl
+                INNER JOIN items i ON i.id = rl.ingredient_item_id
+                WHERE rl.recipe_id = ?
+                ORDER BY i.name
+                """,
+                (recipe["id"],),
+            ).fetchall()
+
+            result = dict(recipe)
+            result["lines"] = [dict(r) for r in lines]
+            return result
+
+    def upsert_daily_overhead(
+        self,
+        overhead_date: str,
+        gas_cost: float,
+        labor_cost: float,
+        misc_cost: float,
+        expected_units: float,
+    ) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_overheads (overhead_date, gas_cost, labor_cost, misc_cost, expected_units)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(overhead_date)
+                DO UPDATE SET
+                    gas_cost = excluded.gas_cost,
+                    labor_cost = excluded.labor_cost,
+                    misc_cost = excluded.misc_cost,
+                    expected_units = excluded.expected_units,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (overhead_date, gas_cost, labor_cost, misc_cost, expected_units),
+            )
+
+    def get_daily_overhead(self, overhead_date: str) -> dict:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT overhead_date, gas_cost, labor_cost, misc_cost, expected_units
+                FROM daily_overheads
+                WHERE overhead_date = ?
+                """,
+                (overhead_date,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "overhead_date": overhead_date,
+                    "gas_cost": 0.0,
+                    "labor_cost": 0.0,
+                    "misc_cost": 0.0,
+                    "expected_units": 0.0,
+                }
+            return dict(row)
+
+    def create_costing_exception(
+        self,
+        exception_type: str,
+        item_id: int | None,
+        sale_id: int | None,
+        details: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        if conn is not None:
+            cursor = conn.execute(
+                """
+                INSERT INTO costing_exceptions (exception_type, item_id, sale_id, details)
+                VALUES (?, ?, ?, ?)
+                """,
+                (exception_type.strip(), item_id, sale_id, details.strip()),
+            )
+            return int(cursor.lastrowid)
+
+        with self.db.transaction() as tx_conn:
+            cursor = tx_conn.execute(
+                """
+                INSERT INTO costing_exceptions (exception_type, item_id, sale_id, details)
+                VALUES (?, ?, ?, ?)
+                """,
+                (exception_type.strip(), item_id, sale_id, details.strip()),
+            )
+            return int(cursor.lastrowid)
+
+    def list_costing_exceptions(self, limit: int = 200) -> list[dict]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ce.id, ce.exception_type, ce.item_id, ce.sale_id, ce.details, ce.created_at,
+                       i.name AS item_name
+                FROM costing_exceptions ce
+                LEFT JOIN items i ON i.id = ce.item_id
+                ORDER BY ce.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def adjust_stock(
         self,
@@ -269,6 +508,17 @@ class Repository:
         items = list(items)
         total_cost = sum(i["quantity"] * i["cost_price"] for i in items)
         with self.db.transaction() as conn:
+            before_snapshot: dict[int, tuple[float, float]] = {}
+            for item in items:
+                item_id = int(item["item_id"])
+                row = conn.execute(
+                    "SELECT stock_quantity, cost_price FROM items WHERE id = ?",
+                    (item_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Purchase item not found.")
+                before_snapshot[item_id] = (float(row["stock_quantity"]), float(row["cost_price"]))
+
             cursor = conn.execute(
                 """
                 INSERT INTO purchases (supplier_name, total_cost, notes)
@@ -296,13 +546,27 @@ class Repository:
             )
 
             for item in items:
+                item_id = int(item["item_id"])
+                qty = float(item["quantity"])
+                purchase_unit_cost = float(item["cost_price"])
                 self.adjust_stock(
                     conn,
-                    item["item_id"],
-                    item["quantity"],
+                    item_id,
+                    qty,
                     movement_type="purchase",
                     reference_id=purchase_id,
                     notes="Stock increased via purchase",
+                )
+
+                previous_qty, previous_avg = before_snapshot[item_id]
+                denominator = previous_qty + qty
+                if denominator > 0:
+                    weighted_avg = ((previous_qty * previous_avg) + (qty * purchase_unit_cost)) / denominator
+                else:
+                    weighted_avg = purchase_unit_cost
+                conn.execute(
+                    "UPDATE items SET cost_price = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (float(weighted_avg), item_id),
                 )
             return purchase_id
 
@@ -391,6 +655,10 @@ class Repository:
                     movement_type="purchase_edit_apply",
                     reference_id=purchase_id,
                     notes="Applied stock from edited purchase",
+                )
+                conn.execute(
+                    "UPDATE items SET cost_price = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (float(item["cost_price"]), int(item["item_id"])),
                 )
 
             conn.execute(

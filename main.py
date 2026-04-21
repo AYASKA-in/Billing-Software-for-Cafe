@@ -39,7 +39,7 @@ def bootstrap() -> MainWindow:
 def main() -> int:
     app = QApplication(sys.argv)
     window = bootstrap()
-    window.show()
+    window.showMaximized()
     return app.exec()
 
 

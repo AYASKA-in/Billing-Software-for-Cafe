@@ -56,6 +56,64 @@ def run_hard_smoke(db_path: Path) -> None:
         stock_quantity=20.0,
         reorder_level=5.0,
     )
+    ingredient_oil = inventory.add_item(
+        name="Smoke Test Oil",
+        category_id=category_map["Food"],
+        selling_price=1.0,
+        cost_price=3.0,
+        stock_quantity=200.0,
+        reorder_level=25.0,
+        item_kind="ingredient",
+        unit_name="ml",
+    )
+    item_recipe_sellable = inventory.add_item(
+        name="Smoke Test Pakoda",
+        category_id=category_map["Food"],
+        selling_price=30.0,
+        cost_price=9.0,
+        stock_quantity=0.0,
+        reorder_level=0.0,
+        item_kind="sellable",
+        costing_mode="recipe",
+        is_stock_tracked=False,
+    )
+    item_recipe_missing = inventory.add_item(
+        name="Smoke Test Recipe Missing",
+        category_id=category_map["Food"],
+        selling_price=28.0,
+        cost_price=8.0,
+        stock_quantity=10.0,
+        reorder_level=2.0,
+    )
+
+    inventory.save_recipe(
+        sellable_item_id=item_recipe_sellable,
+        lines=[
+            {
+                "ingredient_item_id": ingredient_oil,
+                "quantity_used": 50.0,
+                "waste_percent": 10.0,
+            }
+        ],
+        yield_qty=10.0,
+        admin_pin="1234",
+    )
+    inventory.set_item_classification(
+        item_id=item_recipe_missing,
+        item_kind="sellable",
+        costing_mode="recipe",
+        is_stock_tracked=True,
+        admin_pin="1234",
+    )
+
+    bookkeeping.set_daily_overhead(
+        overhead_date=date.today().isoformat(),
+        gas_cost=40.0,
+        labor_cost=80.0,
+        misc_cost=0.0,
+        expected_units=20.0,
+        admin_pin="1234",
+    )
 
     purchase_id = bookkeeping.add_purchase(
         supplier_name="Smoke Supplier",
@@ -78,12 +136,37 @@ def run_hard_smoke(db_path: Path) -> None:
     sale_2 = sales.checkout([
         {"item_id": item_food, "quantity": 1.0},
     ])
+    sale_3 = sales.checkout([
+        {"item_id": item_recipe_sellable, "quantity": 2.0},
+    ])
+    sale_4 = sales.checkout([
+        {"item_id": item_recipe_missing, "quantity": 1.0},
+    ])
     _assert(sale_1["invoice_number"].endswith("000001"), "Invoice sequence #1 mismatch")
     _assert(sale_2["invoice_number"].endswith("000002"), "Invoice sequence #2 mismatch")
+    _assert(sale_3["invoice_number"].endswith("000003"), "Invoice sequence #3 mismatch")
+    _assert(sale_4["invoice_number"].endswith("000004"), "Invoice sequence #4 mismatch")
 
     item_after_sales = repo.get_item(item_food)
     _assert(item_after_sales is not None, "Item missing after sale")
     _assert(round(float(item_after_sales["stock_quantity"]), 2) == 56.0, "Sales stock update mismatch")
+
+    ingredient_after_recipe_sale = repo.get_item(ingredient_oil)
+    _assert(ingredient_after_recipe_sale is not None, "Ingredient missing after recipe sale")
+    # Recipe consumption: 50/10 with 10% waste -> 5.5 per sellable unit, sold 2 units = 11.0
+    _assert(
+        round(float(ingredient_after_recipe_sale["stock_quantity"]), 2) == 189.0,
+        "Recipe ingredient deduction mismatch",
+    )
+
+    exceptions = bookkeeping.list_costing_exceptions(limit=50)
+    _assert(
+        any(
+            e.get("exception_type") == "recipe_missing_fallback_cost" and int(e.get("item_id") or 0) == item_recipe_missing
+            for e in exceptions
+        ),
+        "Fallback-cost exception was not recorded",
+    )
 
     bookkeeping.update_purchase(
         purchase_id=purchase_id,
