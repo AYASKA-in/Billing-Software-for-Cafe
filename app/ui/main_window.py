@@ -5283,7 +5283,8 @@ class MainWindow(QMainWindow):
                 try:
                     msg = self.print_service.send_to_printer(sale_payload, printer_name=printer_to_use)
                     QMessageBox.information(self, "Print Success", msg)
-                    self._log_audit("bill_print", "sale", str(sale_payload.get("sale_id")), invoice_number)
+                    sale_id = sale_payload.get("sale_id") or sale_payload.get("id")
+                    self._log_audit("bill_print", "sale", str(sale_id), invoice_number)
                 except RuntimeError as exc:
                     QMessageBox.critical(self, "Print Failed", str(exc))
             else:
@@ -5314,7 +5315,8 @@ class MainWindow(QMainWindow):
                     try:
                         msg = self.print_service.send_to_printer(sale_payload, printer_name=selected_printer)
                         QMessageBox.information(self, "Print Success", msg)
-                        self._log_audit("bill_print", "sale", str(sale_payload.get("sale_id")), invoice_number)
+                        sale_id = sale_payload.get("sale_id") or sale_payload.get("id")
+                        self._log_audit("bill_print", "sale", str(sale_id), invoice_number)
                     except RuntimeError as exc:
                         QMessageBox.critical(self, "Print Failed", str(exc))
                         

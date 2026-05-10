@@ -20,7 +20,10 @@ class PrintService:
         lines.append("Cafe POS")
         lines.append("------------------------------")
         lines.append(f"Invoice: {invoice_number}")
-        lines.append(f"Sale ID: {bill_payload.get('sale_id')}")
+        # Handle both 'id' (from database) and 'sale_id' (from checkout API)
+        sale_id = bill_payload.get("sale_id") or bill_payload.get("id")
+        if sale_id:
+            lines.append(f"Sale ID: {sale_id}")
         lines.append(f"Date: {bill_payload.get('sold_at', 'N/A')}")
         lines.append(f"Payment: {str(bill_payload.get('payment_method') or 'cash').upper()}")
         if bill_payload.get("customer_name"):
