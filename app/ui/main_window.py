@@ -3065,6 +3065,17 @@ class MainWindow(QMainWindow):
 
         recent_sales_box = QGroupBox("Recent Sales")
         recent_sales_layout = QVBoxLayout(recent_sales_box)
+        
+        # Add button row for print action
+        recent_sales_actions = QHBoxLayout()
+        self.print_selected_bill_btn = QPushButton("🖨️  Print Selected Bill")
+        self.print_selected_bill_btn.setObjectName("StandardAction")
+        self.print_selected_bill_btn.clicked.connect(self.print_selected_bill)
+        self.print_selected_bill_btn.setToolTip("Select a bill from the table and click to print to your default printer")
+        recent_sales_actions.addStretch()
+        recent_sales_actions.addWidget(self.print_selected_bill_btn)
+        recent_sales_layout.addLayout(recent_sales_actions)
+        
         self.recent_sales_table = QTableWidget(0, 6)
         self.recent_sales_table.setHorizontalHeaderLabels(
             ["Invoice", "Time", "Payment", "Customer", "Phone", "Amount"]
@@ -5221,6 +5232,94 @@ class MainWindow(QMainWindow):
                 )
                 if response == QMessageBox.No:
                     return None
+
+    def print_selected_bill(self) -> None:
+        """Print the selected bill from recent sales table."""
+        selected_row = self.recent_sales_table.currentRow()
+        if selected_row < 0:
+            QMessageBox.warning(self, "No Selection", "Please select a bill to print from the Recent Sales table.")
+            return
+
+        # Get invoice number from selected row
+        invoice_item = self.recent_sales_table.item(selected_row, 0)
+        if not invoice_item:
+            return
+        
+        invoice_number = invoice_item.text()
+        
+        try:
+            # Get sale details by invoice number
+            sale_id_item = self.recent_sales_table.item(selected_row, -1)
+            
+            # Query database for the sale
+            sales = self.report_service.recent_sales_between(
+                start_date="2000-01-01",
+                end_date="2099-12-31",
+                limit=500
+            )
+            
+            sale_payload = None
+            for sale_row in sales:
+                if sale_row.get("invoice_number") == invoice_number:
+                    # Get full sale details
+                    sale_payload = self.sales_service.sale_details(int(sale_row["sale_id"]))
+                    break
+            
+            if not sale_payload:
+                QMessageBox.warning(self, "Bill Not Found", f"Could not find bill {invoice_number} in database.")
+                return
+            
+            # Check available printers
+            available_printers = self.print_service.list_available_printers()
+            default_printer = self.print_service.get_default_printer()
+            
+            if not available_printers:
+                QMessageBox.warning(self, "No Printers", "No printers found on this system. Please check your printer setup.")
+                return
+            
+            # If only one printer or default printer exists, use it directly
+            if len(available_printers) == 1 or default_printer:
+                printer_to_use = default_printer if default_printer else available_printers[0]
+                try:
+                    msg = self.print_service.send_to_printer(sale_payload, printer_name=printer_to_use)
+                    QMessageBox.information(self, "Print Success", msg)
+                    self._log_audit("bill_print", "sale", str(sale_payload.get("sale_id")), invoice_number)
+                except RuntimeError as exc:
+                    QMessageBox.critical(self, "Print Failed", str(exc))
+            else:
+                # Multiple printers - let user choose
+                printer_dialog = QDialog(self)
+                printer_dialog.setWindowTitle("Select Printer")
+                layout = QVBoxLayout(printer_dialog)
+                layout.addWidget(QLabel("Select a printer:"))
+                
+                printer_combo = QComboBox()
+                for printer in available_printers:
+                    printer_combo.addItem(printer)
+                if default_printer:
+                    idx = printer_combo.findText(default_printer)
+                    if idx >= 0:
+                        printer_combo.setCurrentIndex(idx)
+                layout.addWidget(printer_combo)
+                
+                button_box = QDialogButtonBox(
+                    QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+                )
+                button_box.accepted.connect(printer_dialog.accept)
+                button_box.rejected.connect(printer_dialog.reject)
+                layout.addWidget(button_box)
+                
+                if printer_dialog.exec() == QDialog.Accepted:
+                    selected_printer = printer_combo.currentText()
+                    try:
+                        msg = self.print_service.send_to_printer(sale_payload, printer_name=selected_printer)
+                        QMessageBox.information(self, "Print Success", msg)
+                        self._log_audit("bill_print", "sale", str(sale_payload.get("sale_id")), invoice_number)
+                    except RuntimeError as exc:
+                        QMessageBox.critical(self, "Print Failed", str(exc))
+                        
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to print bill: {str(exc)}")
 
     def refresh_reports(self) -> None:
         start_date, end_date = self._iso_range_from_edits(self.report_from_date, self.report_to_date)
