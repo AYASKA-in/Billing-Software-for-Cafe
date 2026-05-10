@@ -5,6 +5,7 @@ from datetime import date
 
 from app.database.connection import Database
 from app.database.repository import Repository
+from app.dto import CartItemDTO, PreparedSaleItemDTO, SaleResultDTO
 
 
 class SalesService:
@@ -12,12 +13,18 @@ class SalesService:
         self.db = db
         self.repo = repo
 
-    def checkout(self, cart_items: list[dict], payment_method: str = "cash") -> dict:
+    def checkout(
+        self,
+        cart_items: list[dict] | list[CartItemDTO],
+        payment_method: str = "cash",
+        customer_name: str = "",
+        customer_phone: str = "",
+    ) -> dict:
         if not cart_items:
             raise ValueError("Cart is empty.")
 
         with self.db.transaction() as conn:
-            prepared_items: list[dict] = []
+            prepared_items: list[PreparedSaleItemDTO] = []
             ingredient_deductions: dict[int, float] = defaultdict(float)
             deferred_exceptions: list[dict] = []
             total_amount = 0.0
@@ -28,8 +35,12 @@ class SalesService:
             overhead_per_unit = (overhead_total / expected_units) if expected_units > 0 else 0.0
 
             for cart_item in cart_items:
-                item_id = int(cart_item["item_id"])
-                quantity = float(cart_item["quantity"])
+                if isinstance(cart_item, CartItemDTO):
+                    item_id = int(cart_item.item_id)
+                    quantity = float(cart_item.quantity)
+                else:
+                    item_id = int(cart_item["item_id"])
+                    quantity = float(cart_item["quantity"])
                 if quantity <= 0:
                     raise ValueError("Quantity must be greater than zero.")
 
@@ -93,29 +104,31 @@ class SalesService:
                 total_amount += line_total
 
                 prepared_items.append(
-                    {
-                        "item_id": item_id,
-                        "quantity": quantity,
-                        "unit_price": unit_price,
-                        "unit_cost": unit_cost,
-                        "line_total": line_total,
-                        "deduct_item_stock": deduct_item_stock,
-                    }
+                    PreparedSaleItemDTO(
+                        item_id=item_id,
+                        quantity=quantity,
+                        unit_price=unit_price,
+                        unit_cost=unit_cost,
+                        line_total=line_total,
+                        deduct_item_stock=deduct_item_stock,
+                    )
                 )
 
             sale_id, invoice_number = self.repo.create_sale(
                 conn,
                 total_amount=total_amount,
                 payment_method=payment_method,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
             )
-            self.repo.add_sale_items(conn, sale_id, prepared_items)
+            self.repo.add_sale_items(conn, sale_id, [item.as_repository_row() for item in prepared_items])
 
             for item in prepared_items:
-                if item.get("deduct_item_stock", True):
+                if item.deduct_item_stock:
                     self.repo.adjust_stock(
                         conn,
-                        item_id=item["item_id"],
-                        quantity_delta=-item["quantity"],
+                        item_id=item.item_id,
+                        quantity_delta=-item.quantity,
                         movement_type="sale",
                         reference_id=sale_id,
                         notes="Stock decreased via sale",
@@ -140,11 +153,83 @@ class SalesService:
                     conn=conn,
                 )
 
-            return {
-                "sale_id": sale_id,
-                "invoice_number": invoice_number,
-                "total_amount": total_amount,
-            }
+            return SaleResultDTO(
+                sale_id=sale_id,
+                invoice_number=invoice_number,
+                total_amount=total_amount,
+                payment_method=payment_method,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+            ).as_dict()
+
+    def preview_cart_costing(self, cart_items: list[dict]) -> dict:
+        rows: list[dict] = []
+        warnings: list[str] = []
+
+        overhead = self.repo.get_daily_overhead(date.today().isoformat())
+        overhead_total = float(overhead["gas_cost"]) + float(overhead["labor_cost"]) + float(overhead["misc_cost"])
+        expected_units = float(overhead["expected_units"])
+        overhead_per_unit = (overhead_total / expected_units) if expected_units > 0 else 0.0
+
+        total_sales = 0.0
+        total_cost = 0.0
+        for cart_item in cart_items:
+            item_id = int(cart_item["item_id"])
+            quantity = float(cart_item["quantity"])
+            if quantity <= 0:
+                continue
+
+            item = self.repo.get_item(item_id)
+            if item is None or int(item.get("is_active", 0)) != 1:
+                warnings.append(f"Item #{item_id} unavailable for cost preview.")
+                continue
+
+            unit_price = float(item["selling_price"])
+            unit_cost = float(item["cost_price"])
+            costing_mode = (item.get("costing_mode") or "manual")
+            recipe = self.repo.get_recipe_for_item(item_id)
+
+            if recipe is not None:
+                yield_qty = float(recipe.get("yield_qty", 1) or 1)
+                if yield_qty <= 0:
+                    yield_qty = 1.0
+                recipe_unit_cost = 0.0
+                for line in recipe.get("lines", []):
+                    base_qty = float(line["quantity_used"]) / yield_qty
+                    waste_multiplier = 1.0 + (float(line.get("waste_percent", 0.0)) / 100.0)
+                    consumed_per_unit = base_qty * waste_multiplier
+                    recipe_unit_cost += consumed_per_unit * float(line.get("cost_price", 0.0))
+                unit_cost = recipe_unit_cost + overhead_per_unit
+            elif costing_mode == "recipe":
+                warnings.append(f"{item['name']} is recipe-mode but no active recipe found; using manual cost.")
+
+            line_sales = unit_price * quantity
+            line_cost = unit_cost * quantity
+            margin = line_sales - line_cost
+            total_sales += line_sales
+            total_cost += line_cost
+            rows.append(
+                {
+                    "item_id": item_id,
+                    "name": item["name"],
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                    "est_unit_cost": unit_cost,
+                    "est_line_cost": line_cost,
+                    "line_sales": line_sales,
+                    "est_margin": margin,
+                    "costing_mode": costing_mode,
+                }
+            )
+
+        return {
+            "rows": rows,
+            "total_sales": total_sales,
+            "total_est_cost": total_cost,
+            "est_margin": total_sales - total_cost,
+            "warnings": warnings,
+            "overhead_per_unit": overhead_per_unit,
+        }
 
     def sale_details(self, sale_id: int) -> dict:
         sale = self.repo.get_sale(sale_id)

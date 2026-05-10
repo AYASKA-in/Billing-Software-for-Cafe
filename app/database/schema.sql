@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS sales (
     invoice_number TEXT NOT NULL UNIQUE,
     sold_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     total_amount REAL NOT NULL CHECK (total_amount >= 0),
-    payment_method TEXT NOT NULL DEFAULT 'cash'
+    payment_method TEXT NOT NULL DEFAULT 'cash',
+    customer_name TEXT,
+    customer_phone TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sale_items (
@@ -158,6 +160,12 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales (sold_at);
 CREATE INDEX IF NOT EXISTS idx_sale_items_sale_id ON sale_items (sale_id);
 CREATE INDEX IF NOT EXISTS idx_stock_movements_item_id ON stock_movements (item_id);
@@ -177,7 +185,6 @@ INSERT OR IGNORE INTO categories (name) VALUES
 INSERT OR IGNORE INTO app_settings (setting_key, setting_value) VALUES
     ('invoice_sequence', '0'),
     ('invoice_prefix', 'CAFE'),
-    ('admin_pin', '1234'),
     ('current_role', 'cashier'),
     ('auto_backup_enabled', '0'),
     ('backup_interval_minutes', '60');

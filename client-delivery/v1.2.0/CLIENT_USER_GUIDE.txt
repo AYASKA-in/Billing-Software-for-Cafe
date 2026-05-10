@@ -1,0 +1,55 @@
+Cafe POS - Client User Guide
+Version: 1.2.0
+
+Purpose:
+This guide helps cashier, manager, and owner use the software safely in day-to-day operations.
+
+Application Type:
+Offline desktop app for Windows (Portable).
+
+Main Tabs:
+Billing, Recipes, Inventory, Purchases, Expenses, Reports.
+
+What is new in 1.2.0:
+1. Modern Pearl Light Theme: Completely overhauled UI for better visibility and a premium bright aesthetic.
+2. Professional Branding: New circular Cafe POS logo and application icon.
+3. Enhanced Reports: Fixed visibility issues in Data Ops and Stock Audit sections.
+4. Stability Fixes: Resolved startup errors related to database initialization in bundled builds.
+5. Optimized Layout: Improved button sizing and spacing for easier interaction.
+
+--------------------------------------------------
+1. Installation and Setup
+--------------------------------------------------
+1. Extract CafePOS-v1.2.0-win64.zip to a folder (e.g., C:\CafePOS).
+2. Ensure the 'data' folder is in the same directory as CafePOS_v1.2.0.exe.
+3. Double-click CafePOS_v1.2.0.exe to launch.
+4. If SmartScreen appears, click "More Info" -> "Run Anyway".
+
+--------------------------------------------------
+2. Branding & Theme
+--------------------------------------------------
+1. The app now defaults to a high-contrast bright theme for better daytime legibility.
+2. Look for the circular Cafe POS logo in the header for brand verification.
+
+--------------------------------------------------
+3. Billing Workflow (Counter Operations)
+--------------------------------------------------
+1. Open Billing tab.
+2. Search item or use quick buttons (Product cards are now white with bold borders).
+3. Set quantity and click Add to Cart.
+4. Confirm total and click Generate Bill (Ctrl+Enter).
+
+--------------------------------------------------
+4. Reports and Data Controls
+--------------------------------------------------
+1. Data Ops: Enter Daily Variable Overhead (gas, labor, etc.) and save with admin PIN.
+2. Reports: Select date range and refresh to view full financial performance.
+3. Low Stock: Check the Inventory > Low Stock table for automated replenishment alerts.
+
+--------------------------------------------------
+5. Maintenance
+--------------------------------------------------
+1. Run a backup every day at closing (Reports > Data Ops > Backup Database).
+2. Keep the 'data' folder safe; it contains your entire business history.
+
+End of Guide

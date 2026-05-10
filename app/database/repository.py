@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+import sqlite3
+from datetime import date
 from typing import Iterable
 
 from app.database.connection import Database
+from app.security import hash_pin, verify_pin
 
 
 class Repository:
@@ -97,6 +99,22 @@ class Repository:
                 """,
                 (key, value),
             )
+
+    def set_admin_pin(self, pin: str) -> None:
+        self.set_setting("admin_pin_hash", hash_pin(pin))
+
+    def verify_admin_pin(self, pin: str) -> bool:
+        stored_hash = self.get_setting("admin_pin_hash")
+        if verify_pin(pin, stored_hash):
+            return True
+
+        legacy_pin = self.get_setting("admin_pin")
+        if legacy_pin is not None and pin == legacy_pin:
+            self.set_admin_pin(pin)
+            with self.db.transaction() as conn:
+                conn.execute("DELETE FROM app_settings WHERE setting_key = 'admin_pin'")
+            return True
+        return False
 
     def get_item(self, item_id: int) -> dict | None:
         with self.db.connection() as conn:
@@ -404,7 +422,14 @@ class Repository:
             (item_id, movement_type, quantity_delta, reference_id, notes),
         )
 
-    def create_sale(self, conn, total_amount: float, payment_method: str = "cash") -> tuple[int, str]:
+    def create_sale(
+        self,
+        conn,
+        total_amount: float,
+        payment_method: str = "cash",
+        customer_name: str = "",
+        customer_phone: str = "",
+    ) -> tuple[int, str]:
         row = conn.execute(
             "SELECT setting_value FROM app_settings WHERE setting_key = 'invoice_sequence'"
         ).fetchone()
@@ -419,10 +444,16 @@ class Repository:
         invoice_number = f"{prefix}-{next_seq:06d}"
         cursor = conn.execute(
             """
-            INSERT INTO sales (invoice_number, total_amount, payment_method)
-            VALUES (?, ?, ?)
+            INSERT INTO sales (invoice_number, total_amount, payment_method, customer_name, customer_phone)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (invoice_number, total_amount, payment_method),
+            (
+                invoice_number,
+                total_amount,
+                (payment_method or "cash").strip() or "cash",
+                customer_name.strip() or None,
+                customer_phone.strip() or None,
+            ),
         )
         conn.execute(
             """
@@ -458,7 +489,7 @@ class Repository:
         with self.db.connection() as conn:
             row = conn.execute(
                 """
-                SELECT id, invoice_number, sold_at, total_amount, payment_method
+                SELECT id, invoice_number, sold_at, total_amount, payment_method, customer_name, customer_phone
                 FROM sales
                 WHERE id = ?
                 """,
@@ -610,12 +641,23 @@ class Repository:
 
             old_lines = conn.execute(
                 """
-                SELECT item_id, quantity
+                SELECT item_id, quantity, cost_price
                 FROM purchase_items
                 WHERE purchase_id = ?
                 """,
                 (purchase_id,),
             ).fetchall()
+
+            # Capture current (stock, cost) for every item that will be affected
+            all_item_ids = {int(ol["item_id"]) for ol in old_lines} | {int(i["item_id"]) for i in items}
+            before_snapshot: dict[int, tuple[float, float]] = {}
+            for iid in all_item_ids:
+                row = conn.execute(
+                    "SELECT stock_quantity, cost_price FROM items WHERE id = ?",
+                    (iid,),
+                ).fetchone()
+                if row:
+                    before_snapshot[iid] = (float(row["stock_quantity"]), float(row["cost_price"]))
 
             # Reverse previous stock effect from the old purchase lines.
             for old_line in old_lines:
@@ -626,6 +668,27 @@ class Repository:
                     movement_type="purchase_edit_reverse",
                     reference_id=purchase_id,
                     notes="Reversed stock from purchase edit",
+                )
+
+            # Reverse previous cost-price effect (undo weighted-average contribution)
+            for old_line in old_lines:
+                item_id = int(old_line["item_id"])
+                old_qty = float(old_line["quantity"])
+                old_purchase_cost = float(old_line["cost_price"])
+                cur_stock, cur_cost = before_snapshot[item_id]
+
+                total_value = cur_stock * cur_cost
+                remaining_value = total_value - (old_qty * old_purchase_cost)
+                remaining_stock = cur_stock - old_qty
+
+                if remaining_stock > 0:
+                    corrected_cost = max(0.0, remaining_value / remaining_stock)
+                else:
+                    corrected_cost = 0.0
+
+                conn.execute(
+                    "UPDATE items SET cost_price = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (corrected_cost, item_id),
                 )
 
             conn.execute("DELETE FROM purchase_items WHERE purchase_id = ?", (purchase_id,))
@@ -647,19 +710,39 @@ class Repository:
                 ],
             )
 
+            # Apply new stock and recalculate weighted-average cost (same logic as create_purchase)
             for item in items:
+                item_id = int(item["item_id"])
+                qty = float(item["quantity"])
+                purchase_unit_cost = float(item["cost_price"])
                 self.adjust_stock(
                     conn,
-                    item_id=item["item_id"],
-                    quantity_delta=item["quantity"],
+                    item_id=item_id,
+                    quantity_delta=qty,
                     movement_type="purchase_edit_apply",
                     reference_id=purchase_id,
                     notes="Applied stock from edited purchase",
                 )
-                conn.execute(
-                    "UPDATE items SET cost_price = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (float(item["cost_price"]), int(item["item_id"])),
-                )
+
+                # Read post-reverse state to compute weighted average
+                row = conn.execute(
+                    "SELECT stock_quantity, cost_price FROM items WHERE id = ?",
+                    (item_id,),
+                ).fetchone()
+                if row:
+                    current_stock = float(row["stock_quantity"])
+                    current_cost = float(row["cost_price"])
+                    pre_apply_stock = current_stock - qty
+                    pre_apply_cost = current_cost
+                    denominator = pre_apply_stock + qty
+                    if denominator > 0:
+                        weighted_avg = ((pre_apply_stock * pre_apply_cost) + (qty * purchase_unit_cost)) / denominator
+                    else:
+                        weighted_avg = purchase_unit_cost
+                    conn.execute(
+                        "UPDATE items SET cost_price = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (float(weighted_avg), item_id),
+                    )
 
             conn.execute(
                 """
@@ -727,6 +810,20 @@ class Repository:
                 SELECT id, name, stock_quantity, reorder_level
                 FROM items
                 WHERE is_active = 1 AND stock_quantity <= reorder_level
+                ORDER BY stock_quantity ASC, name ASC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def low_ingredient_items(self) -> list[dict]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, unit_name, stock_quantity, reorder_level
+                FROM items
+                WHERE is_active = 1
+                  AND item_kind = 'ingredient'
+                  AND stock_quantity <= reorder_level
                 ORDER BY stock_quantity ASC, name ASC
                 """
             ).fetchall()
@@ -805,6 +902,54 @@ class Repository:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def sales_payment_breakdown_between(self, start_date: str, end_date: str) -> list[dict]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT LOWER(TRIM(COALESCE(payment_method, 'cash'))) AS payment_method,
+                       COUNT(*) AS bill_count,
+                       COALESCE(SUM(total_amount), 0) AS amount_total
+                FROM sales
+                WHERE DATE(sold_at, 'localtime') BETWEEN DATE(?) AND DATE(?)
+                GROUP BY LOWER(TRIM(COALESCE(payment_method, 'cash')))
+                ORDER BY amount_total DESC, payment_method ASC
+                """,
+                (start_date, end_date),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def recent_sales_between(self, start_date: str, end_date: str, limit: int = 200) -> list[dict]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, invoice_number, sold_at, total_amount, payment_method, customer_name, customer_phone
+                FROM sales
+                WHERE DATE(sold_at, 'localtime') BETWEEN DATE(?) AND DATE(?)
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (start_date, end_date, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def waste_summary_between(self, start_date: str, end_date: str) -> dict:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(SUM(CASE WHEN sm.quantity_delta < 0 THEN -sm.quantity_delta ELSE 0 END), 0) AS waste_qty,
+                       COALESCE(SUM(CASE WHEN sm.quantity_delta < 0 THEN (-sm.quantity_delta) * i.cost_price ELSE 0 END), 0) AS waste_cost
+                FROM stock_movements sm
+                INNER JOIN items i ON i.id = sm.item_id
+                WHERE sm.movement_type = 'waste'
+                  AND DATE(sm.moved_at, 'localtime') BETWEEN DATE(?) AND DATE(?)
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            return {
+                "waste_qty": float(row["waste_qty"] if row else 0),
+                "waste_cost": float(row["waste_cost"] if row else 0),
+            }
+
     def top_selling_items(self, limit: int = 10) -> list[dict]:
         return self.top_selling_items_between("1900-01-01", "9999-12-31", limit=limit)
 
@@ -856,7 +1001,7 @@ class Repository:
                 raise ValueError("Day already closed.")
 
             sales_total = conn.execute(
-                "SELECT COALESCE(SUM(total_amount), 0) AS value FROM sales WHERE DATE(sold_at) = DATE(?)",
+                "SELECT COALESCE(SUM(total_amount), 0) AS value FROM sales WHERE DATE(sold_at, 'localtime') = DATE(?)",
                 (closure_date,),
             ).fetchone()["value"]
             cogs_total = conn.execute(
@@ -864,12 +1009,12 @@ class Repository:
                 SELECT COALESCE(SUM(si.quantity * si.unit_cost), 0) AS value
                 FROM sale_items si
                 INNER JOIN sales s ON s.id = si.sale_id
-                WHERE DATE(s.sold_at) = DATE(?)
+                WHERE DATE(s.sold_at, 'localtime') = DATE(?)
                 """,
                 (closure_date,),
             ).fetchone()["value"]
             expenses_total = conn.execute(
-                "SELECT COALESCE(SUM(amount), 0) AS value FROM expenses WHERE DATE(spent_at) = DATE(?)",
+                "SELECT COALESCE(SUM(amount), 0) AS value FROM expenses WHERE DATE(spent_at, 'localtime') = DATE(?)",
                 (closure_date,),
             ).fetchone()["value"]
 

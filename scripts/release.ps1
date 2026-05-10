@@ -108,6 +108,13 @@ Ensure-PyInstaller -PythonExe $pythonExe
 Write-Host "Building Windows executable with PyInstaller..."
 $schemaFile = Join-Path $repoRoot "app\database\schema.sql"
 $addDataArg = "$schemaFile;app/database"
+$iconFile = Join-Path $repoRoot "app_icon.ico"
+$logoFile = Join-Path $repoRoot "app_logo_circular.png"
+$versionFile = Join-Path $repoRoot "VERSION"
+$licensePublicKey = Join-Path $repoRoot "config\license_public_key.pem"
+$addIconArg = "$iconFile;."
+$addLogoArg = "$logoFile;."
+$addVersionArg = "$versionFile;."
 $pyInstallerArgs = @(
     "-m",
     "PyInstaller",
@@ -116,6 +123,8 @@ $pyInstallerArgs = @(
     "--windowed",
     "--name",
     "CafePOS",
+    "--icon",
+    $iconFile,
     "--distpath",
     $distDir,
     "--workpath",
@@ -124,8 +133,21 @@ $pyInstallerArgs = @(
     $buildDir,
     "--add-data",
     $addDataArg,
+    "--add-data",
+    $addIconArg,
+    "--add-data",
+    $addLogoArg,
+    "--add-data",
+    $addVersionArg,
     "main.py"
 )
+if (Test-Path $licensePublicKey) {
+    $pyInstallerArgs = $pyInstallerArgs[0..($pyInstallerArgs.Length - 2)] + @(
+        "--add-data",
+        "$licensePublicKey;config",
+        "main.py"
+    )
+}
 & $pythonExe @pyInstallerArgs
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed"
@@ -143,7 +165,35 @@ $zipPath = Join-Path $versionDir ("CafePOS-v" + $releaseVersion + "-win64.zip")
 if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
 }
-Compress-Archive -Path $exeFolder -DestinationPath $zipPath -Force
+
+$packageRoot = Join-Path $env:TEMP ("CafePOS-release-" + [guid]::NewGuid().ToString())
+$packageExeFolder = Join-Path $packageRoot "CafePOS"
+try {
+    New-Item -ItemType Directory -Path $packageExeFolder | Out-Null
+    Copy-Item $exeFolder\* $packageExeFolder -Recurse -Force
+
+    $zipCreated = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Compress-Archive -Path $packageExeFolder -DestinationPath $zipPath -Force
+            $zipCreated = $true
+            break
+        } catch {
+            if ($attempt -eq 3) {
+                throw
+            }
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+
+    if (-not $zipCreated) {
+        throw "Failed to create portable zip"
+    }
+} finally {
+    if (Test-Path $packageRoot) {
+        Remove-Item $packageRoot -Recurse -Force
+    }
+}
 
 $installerBuilt = $false
 $installerPath = Join-Path $versionDir ("CafePOS-v" + $releaseVersion + "-setup.exe")

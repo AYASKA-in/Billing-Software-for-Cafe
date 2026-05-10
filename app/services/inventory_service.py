@@ -108,9 +108,11 @@ class InventoryService:
     def low_stock_items(self) -> list[dict]:
         return self.repo.low_stock_items()
 
+    def low_ingredient_items(self) -> list[dict]:
+        return self.repo.low_ingredient_items()
+
     def verify_admin_pin(self, pin: str) -> bool:
-        configured_pin = self.repo.get_setting("admin_pin", "1234")
-        return pin == configured_pin
+        return self.repo.verify_admin_pin(pin)
 
     def update_item_pricing(
         self,
@@ -161,6 +163,27 @@ class InventoryService:
                 quantity_delta=quantity_delta,
                 movement_type="manual",
                 notes=notes or "Manual stock correction",
+            )
+
+    def record_waste(
+        self,
+        item_id: int,
+        quantity: float,
+        admin_pin: str,
+        notes: str = "",
+    ) -> None:
+        if not self.verify_admin_pin(admin_pin):
+            raise ValueError("Invalid admin PIN.")
+        if quantity <= 0:
+            raise ValueError("Waste quantity must be greater than zero.")
+
+        with self.repo.db.transaction() as conn:
+            self.repo.adjust_stock(
+                conn,
+                item_id=item_id,
+                quantity_delta=-float(quantity),
+                movement_type="waste",
+                notes=notes or "Stock marked as waste",
             )
 
     def stock_movements(self, limit: int = 200) -> list[dict]:

@@ -7,8 +7,8 @@ from datetime import datetime
 from datetime import date, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QDate, QSize, Qt, QTimer, QEasingCurve, QPropertyAnimation, QParallelAnimationGroup
+from PySide6.QtGui import QColor, QKeySequence, QShortcut, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSpinBox,
+    QStackedWidget,
     QPushButton,
     QSizePolicy,
     QScrollArea,
@@ -41,21 +42,54 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
 
 from app.services.bookkeeping_service import BookkeepingService
 from app.services.inventory_service import InventoryService
+from app.services.license_service import LicenseService
 from app.services.print_service import PrintService
 from app.services.report_service import ReportService
 from app.services.sales_service import SalesService
-from app.utils.backup import create_backup, export_backup, inspect_backup_counts, restore_backup
+from app.ui.controllers.billing_controller import BillingController
+from app.ui.controllers.inventory_controller import InventoryController
+from app.ui.controllers.main_window_ops_controller import MainWindowOpsController
+from app.ui.controllers.reports_controller import ReportsController
+from app.ui.export_helpers import table_rows_for_csv, write_csv_file
+from app.ui.premium_theme import premium_pos_stylesheet
+from app.ui.views.billing_view import (
+    apply_billing_dashboard_style,
+    build_billing_tab,
+    make_billing_stat_card,
+    style_billing_table,
+)
+from app.ui.views.inventory_view import apply_inventory_panel_style, build_inventory_tab
+
 
 
 class MainWindow(QMainWindow):
     MIN_WINDOW_WIDTH = 900
     MIN_WINDOW_HEIGHT = 680
+    
+    THEME = {
+        "bg_deep": "#eef3f8",
+        "bg_surface": "#ffffff",
+        "bg_surface_light": "#f8fafc",
+        "primary_soft": "#eaf2ff",
+        "accent_primary": "#0f766e",
+        "primary_hover": "#0b5e54",
+        "accent_gold": "#c97900",
+        "success": "#16a34a",
+        "danger": "#b91c1c",
+        "warning": "#c97900",
+        "text_primary": "#111827",
+        "text_medium": "#475569",
+        "text_low": "#8190a6",
+        "border": "#d7e0eb",
+        "border_bold": "#98a8bd"
+    }
 
     def __init__(
         self,
@@ -65,6 +99,7 @@ class MainWindow(QMainWindow):
         report_service: ReportService,
         print_service: PrintService,
         db_path: str = "data/cafe.db",
+        app_version: str = "0.0.0",
     ) -> None:
         super().__init__()
         self.inventory_service = inventory_service
@@ -73,6 +108,9 @@ class MainWindow(QMainWindow):
         self.report_service = report_service
         self.print_service = print_service
         self.db_path = db_path
+        self.app_version = app_version
+        self.license_service = LicenseService(self.bookkeeping_service)
+        self._activation_failed = False
 
         self.cart: dict[int, dict] = {}
         self.billing_items_cache: list[dict] = []
@@ -86,32 +124,108 @@ class MainWindow(QMainWindow):
         self._updating_purchase_table = False
         self._updating_expense_table = False
         self.cart_file = Path("data/pending_cart.json")
+        self.sidebar_expanded_width = 220
+        self.sidebar_collapsed_width = 78
+        self.sidebar_collapsed = False
+        self._sidebar_anim_group: QParallelAnimationGroup | None = None
+        self.billing_controller = BillingController(self)
+        self.inventory_controller = InventoryController(self)
+        self.ops_controller = MainWindowOpsController(self)
+        self.reports_controller = ReportsController(self)
 
-        self.setWindowTitle("Cafe POS and Bookkeeping")
+        self.setWindowTitle(f"Cafe POS v{self.app_version}")
         self.setMinimumSize(self.MIN_WINDOW_WIDTH, self.MIN_WINDOW_HEIGHT)
         self.resize(1320, 820)
+        
+        # Set Window Icon
+        icon_path = os.path.join(os.path.dirname(__file__), "app_icon.ico")
+        if not os.path.exists(icon_path):
+            # Fallback if it's in the project root
+            icon_path = "app_icon.ico"
+            
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self._build_professional_shell_header()
 
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("AppTabs")
-        self.setCentralWidget(self.tabs)
+        self.page_stack = QStackedWidget()
+        self.page_stack.setObjectName("AppPageStack")
+        self.tabs = self.page_stack
 
         self.billing_tab = self._build_billing_tab()
+        self.recipe_tab = self._build_recipe_tab()
         self.inventory_tab = self._build_inventory_tab()
         self.purchases_tab = self._build_purchases_tab()
         self.expenses_tab = self._build_expenses_tab()
         self.reports_tab = self._build_reports_tab()
 
-        self.tabs.addTab(self.billing_tab, "Billing")
-        self.tabs.addTab(self.inventory_tab, "Inventory")
-        self.tabs.addTab(self.purchases_tab, "Purchases")
-        self.tabs.addTab(self.expenses_tab, "Expenses")
-        self.tabs.addTab(self.reports_tab, "Reports")
-        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.page_titles = ["Billing", "Recipes", "Inventory", "Purchases", "Expenses", "Reports"]
+        self.page_widgets = [
+            self.billing_tab,
+            self.recipe_tab,
+            self.inventory_tab,
+            self.purchases_tab,
+            self.expenses_tab,
+            self.reports_tab,
+        ]
+
+        shell_root = QWidget()
+        shell_root.setObjectName("AppShellRoot")
+        shell_layout = QHBoxLayout(shell_root)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("AppSidebar")
+        self.sidebar.setMinimumWidth(self.sidebar_expanded_width)
+        self.sidebar.setMaximumWidth(self.sidebar_expanded_width)
+        self.sidebar_layout = QVBoxLayout(self.sidebar)
+        self.sidebar_layout.setContentsMargins(10, 14, 10, 14)
+        self.sidebar_layout.setSpacing(8)
+
+        self.sidebar_toggle_btn = QToolButton()
+        self.sidebar_toggle_btn.setObjectName("SidebarToggleButton")
+        self.sidebar_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
+        self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
+        self.sidebar_layout.addWidget(self.sidebar_toggle_btn, alignment=Qt.AlignLeft)
+
+        self.sidebar_nav_buttons: list[QPushButton] = []
+        for index, title in enumerate(self.page_titles):
+            page = self.page_widgets[index]
+            self.page_stack.addWidget(page)
+            btn = QPushButton(title)
+            btn.setObjectName("SidebarNavButton")
+            btn.setCheckable(True)
+            btn.setProperty("fullLabel", title)
+            btn.setProperty("compact", False)
+            btn.setIcon(self._sidebar_icon_for_page(title))
+            btn.setIconSize(QSize(16, 16))
+            btn.setMinimumHeight(42)
+            btn.setMinimumWidth(184)
+            btn.setMaximumWidth(184)
+            btn.setToolTip(title)
+            btn.clicked.connect(lambda _, i=index: self._switch_page(i))
+            self.sidebar_layout.addWidget(btn)
+            self.sidebar_nav_buttons.append(btn)
+
+        self.sidebar_layout.addStretch(1)
+
+        shell_layout.addWidget(self.sidebar)
+        shell_layout.addWidget(self.page_stack, 1)
+        self.setCentralWidget(shell_root)
+
+        self.page_stack.currentChanged.connect(self._on_tab_changed)
+        self._set_sidebar_collapsed(False, animate=False)
+        self._switch_page(0)
 
         self._apply_professional_shell_theme()
         self._setup_status_bar()
+
+        if not self.ops_controller.ensure_license_activation():
+            self._activation_failed = True
+            QTimer.singleShot(0, QApplication.instance().quit)
+            return
 
         self._wire_shortcuts()
 
@@ -132,6 +246,7 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         self._load_pending_cart()
         self._update_shell_status()
+        self._apply_role_permissions()
 
     def minimumSizeHint(self) -> QSize:
         # Keep window constraints practical so the app can fit smaller screens.
@@ -162,25 +277,70 @@ class MainWindow(QMainWindow):
         self.setGeometry(available.x(), available.y(), target_width, target_height)
 
     def _on_tab_changed(self, tab_index: int) -> None:
-        if tab_index == 0:
+        self._set_active_sidebar(tab_index)
+        tab_widget = self.tabs.widget(tab_index)
+        if tab_widget is self.billing_tab:
             self.refresh_billing_items()
             QTimer.singleShot(0, self._focus_billing_search)
-        elif tab_index == 1:
+        elif tab_widget is self.recipe_tab:
+            self.refresh_recipe_tab()
+        elif tab_widget is self.inventory_tab:
             self.refresh_inventory()
             QTimer.singleShot(0, self._focus_inventory_name)
-        elif tab_index == 2:
+        elif tab_widget is self.purchases_tab:
             self.refresh_purchases_tab()
-        elif tab_index == 3:
+        elif tab_widget is self.expenses_tab:
             self.refresh_expenses_tab()
-        elif tab_index == 4:
+        elif tab_widget is self.reports_tab:
             self.refresh_reports()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._apply_adaptive_layout()
+
+    def _apply_adaptive_layout(self) -> None:
+        width = self.width()
+        is_compact = width < 1200
+
+        # Billing Adaptations
+        if hasattr(self, "billing_tab"):
+            self._set_billing_compact_mode(is_compact)
+            if hasattr(self, "total_label"):
+                size = 28 if is_compact else 38
+                self.total_label.setStyleSheet(f"font-size: {size}px; font-weight: 900; color: {self.THEME['accent_primary']};")
+
+        # Reports Adaptations
+        if hasattr(self, "reports_cards_grid") and hasattr(self, "metric_cards"):
+            cols = 2 if is_compact else 4
+            if not hasattr(self, "_last_reports_cols") or self._last_reports_cols != cols:
+                self._last_reports_cols = cols
+                # Remove all from grid
+                for card in self.metric_cards:
+                    self.reports_cards_grid.removeWidget(card)
+                # Re-add with new col count
+                for index, card in enumerate(self.metric_cards):
+                    row = index // cols
+                    col = index % cols
+                    self.reports_cards_grid.addWidget(card, row, col)
+
         if hasattr(self, "top_items_table"):
             self._apply_report_table_width_profiles()
-        if hasattr(self, "billing_compact_toggle") and self.billing_compact_toggle.isChecked():
-            self._set_billing_compact_mode(True)
+
+    def _f(self, value, default: float = 0.0) -> float:
+        """Safe float conversion for database fields."""
+        try:
+            if value is None: return default
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+    def _i(self, value, default: int = 0) -> int:
+        """Safe int conversion for database fields."""
+        try:
+            if value is None: return default
+            return int(float(value))
+        except (ValueError, TypeError):
+            return default
 
     def _wire_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.checkout)
@@ -197,6 +357,105 @@ class MainWindow(QMainWindow):
             return
         self.showFullScreen()
 
+    def _switch_page(self, page_index: int) -> None:
+        if not hasattr(self, "page_stack"):
+            return
+        if page_index < 0 or page_index >= self.page_stack.count():
+            return
+        self.page_stack.setCurrentIndex(page_index)
+
+    def _set_active_sidebar(self, active_index: int) -> None:
+        if not hasattr(self, "sidebar_nav_buttons"):
+            return
+        for idx, btn in enumerate(self.sidebar_nav_buttons):
+            btn.blockSignals(True)
+            btn.setChecked(idx == active_index)
+            btn.blockSignals(False)
+
+    def _sidebar_icon_for_page(self, title: str) -> QIcon:
+        icon_map = {
+            "Billing": QStyle.SP_DialogApplyButton,
+            "Recipes": QStyle.SP_FileDialogContentsView,
+            "Inventory": QStyle.SP_DriveHDIcon,
+            "Purchases": QStyle.SP_DialogOpenButton,
+            "Expenses": QStyle.SP_DialogSaveButton,
+            "Reports": QStyle.SP_FileDialogDetailedView,
+        }
+        return self.style().standardIcon(icon_map.get(title, QStyle.SP_FileIcon))
+
+    def _toggle_sidebar(self) -> None:
+        self._set_sidebar_collapsed(not self.sidebar_collapsed, animate=True)
+
+    def _set_sidebar_collapsed(self, collapsed: bool, animate: bool = True) -> None:
+        if not hasattr(self, "sidebar"):
+            return
+
+        collapsed = bool(collapsed)
+        target_sidebar_width = self.sidebar_collapsed_width if collapsed else self.sidebar_expanded_width
+        target_button_width = 46 if collapsed else 184
+
+        self.sidebar_collapsed = collapsed
+        self._update_sidebar_toggle_button()
+
+        if not animate:
+            self.sidebar.setMinimumWidth(target_sidebar_width)
+            self.sidebar.setMaximumWidth(target_sidebar_width)
+            for btn in self.sidebar_nav_buttons:
+                btn.setMinimumWidth(target_button_width)
+                btn.setMaximumWidth(target_button_width)
+            self._apply_sidebar_visual_state(collapsed)
+            return
+
+        if not collapsed:
+            for btn in self.sidebar_nav_buttons:
+                btn.setText(str(btn.property("fullLabel") or btn.text()))
+
+        self._sidebar_anim_group = QParallelAnimationGroup(self)
+        duration = 220
+
+        for prop_name in (b"minimumWidth", b"maximumWidth"):
+            anim = QPropertyAnimation(self.sidebar, prop_name, self)
+            anim.setDuration(duration)
+            anim.setStartValue(self.sidebar.width())
+            anim.setEndValue(target_sidebar_width)
+            anim.setEasingCurve(QEasingCurve.InOutCubic)
+            self._sidebar_anim_group.addAnimation(anim)
+
+        for btn in self.sidebar_nav_buttons:
+            for prop_name in (b"minimumWidth", b"maximumWidth"):
+                anim = QPropertyAnimation(btn, prop_name, self)
+                anim.setDuration(duration)
+                anim.setStartValue(btn.width())
+                anim.setEndValue(target_button_width)
+                anim.setEasingCurve(QEasingCurve.InOutCubic)
+                self._sidebar_anim_group.addAnimation(anim)
+
+        self._sidebar_anim_group.finished.connect(lambda: self._apply_sidebar_visual_state(collapsed))
+        self._sidebar_anim_group.start()
+
+    def _update_sidebar_toggle_button(self) -> None:
+        if not hasattr(self, "sidebar_toggle_btn"):
+            return
+        if self.sidebar_collapsed:
+            self.sidebar_toggle_btn.setArrowType(Qt.RightArrow)
+            self.sidebar_toggle_btn.setToolTip("Expand sidebar")
+        else:
+            self.sidebar_toggle_btn.setArrowType(Qt.LeftArrow)
+            self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
+
+    def _apply_sidebar_visual_state(self, collapsed: bool) -> None:
+        for btn in self.sidebar_nav_buttons:
+            full_label = str(btn.property("fullLabel") or btn.text())
+            btn.setText("" if collapsed else full_label)
+            btn.setToolTip(full_label)
+            btn.setProperty("compact", collapsed)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+        if hasattr(self, "sidebar_layout"):
+            self.sidebar_layout.setContentsMargins(8, 10, 8, 10) if collapsed else self.sidebar_layout.setContentsMargins(10, 14, 10, 14)
+        self._set_active_sidebar(self.page_stack.currentIndex())
+
     def _build_professional_shell_header(self) -> None:
         header = QWidget()
         header.setObjectName("AppShellHeader")
@@ -209,6 +468,13 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("Retail Operations Console")
         subtitle.setObjectName("AppShellSubtitle")
 
+        # Logo next to title
+        logo_label = QLabel()
+        logo_path = "app_logo_circular.png"
+        if os.path.exists(logo_path):
+            pixmap = QPixmap(logo_path)
+            logo_label.setPixmap(pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
         title_stack = QVBoxLayout()
         title_stack.setContentsMargins(0, 0, 0, 0)
         title_stack.setSpacing(1)
@@ -218,6 +484,7 @@ class MainWindow(QMainWindow):
         self.header_role_badge = QLabel("ROLE: CASHIER")
         self.header_role_badge.setObjectName("HeaderRoleBadge")
 
+        layout.addWidget(logo_label)
         layout.addLayout(title_stack)
         layout.addStretch()
         layout.addWidget(self.header_role_badge)
@@ -225,74 +492,426 @@ class MainWindow(QMainWindow):
         self.setMenuWidget(header)
 
     def _apply_professional_shell_theme(self) -> None:
-        self.setStyleSheet(
-            "QMainWindow {"
-            "background-color: #20242c;"
-            "}"
-            "#AppShellHeader {"
-            "background-color: #182233;"
-            "border-bottom: 1px solid #2a3b57;"
-            "}"
-            "#AppShellTitle {"
-            "font-size: 15px;"
-            "font-weight: 700;"
-            "color: #f2f6fc;"
-            "}"
-            "#AppShellSubtitle {"
-            "font-size: 11px;"
-            "color: #a8bad7;"
-            "}"
-            "#HeaderRoleBadge {"
-            "padding: 4px 10px;"
-            "border: 1px solid #4b5d7a;"
-            "border-radius: 12px;"
-            "background-color: #25344d;"
-            "color: #dce8fb;"
-            "font-weight: 700;"
-            "}"
-            "QTabWidget#AppTabs::pane {"
-            "border-top: 1px solid #33435b;"
-            "top: -1px;"
-            "}"
-            "QTabBar::tab {"
-            "background-color: #232c3b;"
-            "color: #c8d7ee;"
-            "padding: 8px 14px;"
-            "margin-right: 2px;"
-            "border-top-left-radius: 6px;"
-            "border-top-right-radius: 6px;"
-            "border: 1px solid #39475f;"
-            "}"
-            "QTabBar::tab:selected {"
-            "background-color: #2c3e5b;"
-            "color: #ffffff;"
-            "border-color: #506792;"
-            "font-weight: 700;"
-            "}"
-            "QTabBar::tab:hover {"
-            "background-color: #2b394f;"
-            "}"
-            "QStatusBar {"
-            "background-color: #17202f;"
-            "border-top: 1px solid #2d3b53;"
-            "color: #c7d5ec;"
-            "}"
-            "QStatusBar QLabel {"
-            "color: #c7d5ec;"
-            "padding: 0 6px;"
-            "}"
-        )
+        T = self.THEME
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                background-color: {T['bg_deep']};
+            }}
+            QWidget {{
+                color: {T['text_primary']};
+                font-family: 'Segoe UI Variable', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            }}
+            #AppShellRoot {{
+                background-color: {T['bg_deep']};
+            }}
+            #AppShellHeader {{
+                background-color: {T['bg_surface']};
+                border-bottom: 2px solid {T['border']};
+            }}
+            #AppShellTitle {{
+                font-size: 16px;
+                font-weight: 800;
+                color: {T['accent_primary']};
+            }}
+            #AppShellSubtitle {{
+                font-size: 11px;
+                color: {T['text_medium']};
+                letter-spacing: 1px;
+            }}
+            #HeaderRoleBadge {{
+                padding: 4px 12px;
+                border: 1px solid {T['accent_primary']};
+                border-radius: 12px;
+                background-color: transparent;
+                color: {T['accent_primary']};
+                font-weight: 700;
+                font-size: 10px;
+            }}
+            #AppSidebar {{
+                background-color: {T['bg_surface']};
+                border-right: 1px solid {T['border']};
+            }}
+            QToolButton#SidebarToggleButton {{
+                background-color: {T['bg_surface_light']};
+                color: {T['accent_primary']};
+                border: 1px solid {T['border']};
+                border-radius: 8px;
+                padding: 6px;
+                min-width: 28px;
+                min-height: 28px;
+            }}
+            QToolButton#SidebarToggleButton:hover {{
+                border-color: {T['accent_primary']};
+                background-color: #eaf2ff;
+            }}
+            QPushButton#SidebarNavButton {{
+                text-align: left;
+                background-color: transparent;
+                color: {T['text_medium']};
+                border: 1px solid transparent;
+                border-radius: 10px;
+                padding: 10px 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton#SidebarNavButton[compact="true"] {{
+                text-align: center;
+                padding: 10px 6px;
+            }}
+            QPushButton#SidebarNavButton:hover {{
+                background-color: {T['bg_surface_light']};
+                color: {T['text_primary']};
+            }}
+            QPushButton#SidebarNavButton:checked {{
+                background-color: #dbeafe;
+                color: {T['accent_primary']};
+                border-color: #bfdbfe;
+                font-weight: 800;
+            }}
+            #AppPageStack {{
+                background-color: {T['bg_deep']};
+                border: none;
+            }}
+            QSplitter::handle {{
+                background-color: {T['border']};
+            }}
+            QSplitter::handle:hover {{
+                background-color: {T['accent_primary']};
+            }}
+            QStatusBar {{
+                background-color: {T['bg_surface']};
+                border-top: 1px solid {T['border']};
+                color: {T['text_medium']};
+            }}
+            QStatusBar QLabel {{
+                color: {T['text_medium']};
+                padding: 0 10px;
+            }}
+            
+            /* Generic Table Styles */
+            QTableWidget {{
+                background-color: {T['bg_surface']};
+                border: 1.5px solid {T['border_bold']};
+                gridline-color: {T['border_bold']};
+                border-radius: 8px;
+                outline: 0;
+                color: {T['text_primary']};
+            }}
+            QHeaderView::section {{
+                background-color: {T['bg_deep']};
+                color: {T['text_primary']};
+                padding: 8px;
+                border: none;
+                border-bottom: 2px solid {T['border_bold']};
+                font-weight: bold;
+                text-transform: uppercase;
+                font-size: 11px;
+            }}
+            QTableWidget::item {{
+                padding: 8px;
+                border-bottom: 1px solid {T['border']};
+            }}
+            QTableWidget::item:selected {{
+                background-color: #e2e8f0;
+                color: {T['text_primary']};
+            }}
+
+            /* ScrollBars */
+            QScrollBar:vertical {{
+                background: {T['bg_deep']};
+                width: 10px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {T['border']};
+                min-height: 20px;
+                border-radius: 5px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+
+            /* Buttons - Supporting both Class and ObjectName */
+            QPushButton#PayAction, QPushButton.PayAction {{
+                background-color: {T['success']};
+                color: white;
+                font-size: 20px;
+                font-weight: 900;
+                border-radius: 10px;
+                padding: 10px;
+            }}
+            QPushButton#PayAction:hover, QPushButton.PayAction:hover {{
+                background-color: #15803d;
+            }}
+            
+            QPushButton#StandardAction, QPushButton.StandardAction, 
+            QPushButton#PrimaryPurchaseButton, QPushButton#SecondaryPurchaseButton,
+            QPushButton#PrimaryInventoryButton, QToolButton#StandardAction, QToolButton#PrimaryInventoryButton {{
+                background-color: {T['accent_primary']};
+                color: white;
+                font-size: 13px;
+                font-weight: 800;
+                border-radius: 8px;
+                padding: 6px 14px;
+                border: none;
+            }}
+            QPushButton#StandardAction:hover, QPushButton.StandardAction:hover,
+            QPushButton#PrimaryPurchaseButton:hover, QPushButton#SecondaryPurchaseButton:hover,
+            QPushButton#PrimaryInventoryButton:hover, QToolButton#StandardAction:hover {{
+                background-color: #1d4ed8;
+            }}
+            
+            QPushButton#DangerAction, QPushButton.DangerAction, QToolButton#DangerAction {{
+                background-color: {T['danger']};
+                color: white;
+                font-size: 13px;
+                font-weight: 800;
+                border-radius: 8px;
+                padding: 6px 14px;
+                border: none;
+            }}
+            QPushButton#DangerAction:hover, QPushButton.DangerAction:hover, QToolButton#DangerAction:hover {{
+                background-color: #b91c1c;
+            }}
+            
+            QPushButton#CategoryTab, QPushButton.CategoryTab {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                font-size: 13px;
+                font-weight: 700;
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 18px;
+                padding: 6px 16px;
+                margin: 4px;
+            }}
+            QPushButton#CategoryTab:checked, QPushButton.CategoryTab:checked {{
+                background-color: {T['text_primary']};
+                color: white;
+                border-color: {T['text_primary']};
+            }}
+            
+            QPushButton#QuickAddItem, QPushButton.QuickAddItem {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                font-size: 13px;
+                font-weight: 800;
+                border-radius: 14px;
+                padding: 10px;
+                border: 1.5px solid {T['border_bold']};
+            }}
+            QPushButton#QuickAddItem:hover, QPushButton.QuickAddItem:hover {{
+                background-color: {T['bg_surface_light']};
+                border-color: {T['accent_primary']};
+                color: {T['accent_primary']};
+            }}
+
+            #AppToast {{
+                background-color: {T['text_primary']};
+                color: white;
+                font-size: 16px;
+                font-weight: 800;
+                border-radius: 20px;
+                padding: 12px 30px;
+            }}
+            
+            /* Inputs, Lists & Menus */
+            QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QDateEdit, QListWidget {{
+                background-color: {T['bg_surface']};
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 6px;
+                padding: 6px;
+                color: {T['text_primary']};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                selection-background-color: {T['bg_surface_light']};
+                selection-color: {T['accent_primary']};
+                outline: 0;
+                border: 1px solid {T['border_bold']};
+            }}
+            QCalendarWidget QWidget {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+            }}
+            QCalendarWidget QAbstractItemView:enabled {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                selection-background-color: {T['accent_primary']};
+                selection-color: white;
+            }}
+            QCalendarWidget QToolButton {{
+                color: {T['text_primary']};
+                background-color: transparent;
+                border: none;
+                font-weight: bold;
+            }}
+            QCalendarWidget QSpinBox {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                border: none;
+            }}
+            QListWidget::item {{
+                padding: 6px;
+                border-bottom: 1px solid {T['border']};
+            }}
+            QListWidget::item:selected {{
+                background-color: {T['bg_surface_light']};
+                color: {T['accent_primary']};
+            }}
+            QMenu {{
+                background-color: {T['bg_surface']};
+                border: 1px solid {T['border_bold']};
+                padding: 5px;
+                color: {T['text_primary']};
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {T['bg_surface_light']};
+                color: {T['accent_primary']};
+            }}
+            
+            QLineEdit:focus {{
+                border-color: {T['accent_primary']};
+                background-color: {T['bg_surface_light']};
+            }}
+            
+            QGroupBox {{
+                font-weight: 800;
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 12px;
+                margin-top: 15px;
+                padding-top: 20px;
+                color: {T['text_primary']};
+                background-color: {T['bg_surface']};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: {T['text_primary']};
+            }}
+            
+            /* Sub-Tab Styling (Reports) */
+            #ReportsSubTabs::pane {{
+                border: 1px solid {T['border']};
+                background-color: {T['bg_deep']};
+                border-radius: 8px;
+            }}
+            #ReportsSubTabs QTabBar::tab {{
+                background-color: {T['bg_surface']};
+                color: {T['text_medium']};
+                padding: 8px 16px;
+                border: 1px solid {T['border']};
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                margin-right: 2px;
+            }}
+            #ReportsSubTabs QTabBar::tab:selected {{
+                background-color: {T['bg_deep']};
+                color: {T['accent_primary']};
+                border-bottom-color: {T['bg_deep']};
+                font-weight: bold;
+            }}
+            
+            /* Global Backgrounds & Scroll Areas */
+            QMainWindow, QScrollArea, QScrollArea > QWidget {{
+                background-color: {T['bg_deep']};
+                border: none;
+            }}
+            #BillingCategoryContainer, #BillingCatalogGroup, #RecipePanel, #InventoryPanel, #PurchasesPanel, #ExpensesPanel, #ReportsPanel {{
+                background-color: {T['bg_deep']};
+            }}
+            #OpsHintLabel {{
+                color: {T['text_medium']};
+                font-size: 12px;
+                font-weight: 600;
+                padding: 2px 1px;
+            }}
+            #OpsFilterBar {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 10px;
+                background-color: {T['bg_surface']};
+                padding: 8px;
+            }}
+            #OpsSectionCard {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 12px;
+                background-color: {T['bg_surface']};
+            }}
+            
+            /* Global Header View */
+            QHeaderView, QHeaderView::section {{
+                background-color: {T['bg_deep']};
+                border: none;
+                color: {T['text_primary']};
+            }}
+
+            /* Dialogs & Messages */
+            QDialog, QMessageBox, QInputDialog {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+            }}
+            QMessageBox QLabel, QDialog QLabel {{
+                color: {T['text_primary']};
+                font-size: 14px;
+            }}
+            QDialog QPushButton, QMessageBox QPushButton, QInputDialog QPushButton {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 8px;
+                padding: 6px 18px;
+                font-weight: bold;
+                min-width: 90px;
+            }}
+            QDialog QPushButton:hover, QMessageBox QPushButton:hover, QInputDialog QPushButton:hover {{
+                background-color: {T['bg_surface_light']};
+                border-color: {T['accent_primary']};
+                color: {T['accent_primary']};
+            }}
+            QDialog QLineEdit {{
+                min-width: 250px;
+            }}
+        """ + premium_pos_stylesheet(T))
 
     def _setup_status_bar(self) -> None:
         self.status_role_label = QLabel()
         self.status_tab_label = QLabel()
+        self.status_license_label = QLabel()
         self.status_db_label = QLabel(f"DB: {Path(self.db_path).name}")
         self.status_time_label = QLabel()
 
         self.statusBar().addPermanentWidget(self.status_role_label)
         self.statusBar().addPermanentWidget(self.status_tab_label)
+        self.statusBar().addPermanentWidget(self.status_license_label)
         self.statusBar().addPermanentWidget(self.status_db_label)
         self.statusBar().addPermanentWidget(self.status_time_label)
+
+        # Setup Toast Warning Overlay
+        self.toast_label = QLabel(self)
+        self.toast_label.setObjectName("AppToast")
+        self.toast_label.setAlignment(Qt.AlignCenter)
+        self.toast_label.setWindowFlags(Qt.FramelessWindowHint | Qt.ToolTip)
+        self.toast_label.hide()
+
+    def show_toast(self, message: str, is_error: bool = False) -> None:
+        self.toast_label.setText(message)
+        if is_error:
+            self.toast_label.setStyleSheet("background-color: #e74c3c; color: white;")
+        else:
+            self.toast_label.setStyleSheet("background-color: #27ae60; color: white;")
+            
+        self.toast_label.adjustSize()
+        x = self.geometry().center().x() - self.toast_label.width() // 2
+        y = self.geometry().center().y() - 100
+        self.toast_label.move(x, y)
+        self.toast_label.raise_()
+        self.toast_label.show()
+        QTimer.singleShot(1500, self.toast_label.hide)
 
     def _update_shell_status(self) -> None:
         role = self.current_role.upper() if self.current_role else "CASHIER"
@@ -301,8 +920,16 @@ class MainWindow(QMainWindow):
             self.header_role_badge.setText(f"ROLE: {role}")
 
         if hasattr(self, "tabs") and self.tabs.count() > 0:
-            tab_name = self.tabs.tabText(self.tabs.currentIndex())
+            current_index = self.tabs.currentIndex()
+            tab_name = (
+                self.page_titles[current_index]
+                if hasattr(self, "page_titles") and 0 <= current_index < len(self.page_titles)
+                else f"Module {current_index + 1}"
+            )
             self.status_tab_label.setText(f"MODULE: {tab_name}")
+
+        if hasattr(self, "license_service"):
+            self.status_license_label.setText(f"LICENSE: {self.license_service.summary_text()}")
 
         self.status_time_label.setText(datetime.now().strftime("%d %b %Y  %I:%M:%S %p"))
 
@@ -315,6 +942,8 @@ class MainWindow(QMainWindow):
         return tab
 
     def _build_billing_tab(self) -> QWidget:
+        return build_billing_tab(self)
+
         tab = QWidget()
         tab.setObjectName("BillingDashboard")
         root_layout = QVBoxLayout(tab)
@@ -343,161 +972,169 @@ class MainWindow(QMainWindow):
         hero_layout.addLayout(hero_text_layout)
         hero_layout.addStretch()
         hero_layout.addLayout(stats_layout)
+        hero_frame.setMaximumHeight(100)
+        hero_frame.setMinimumHeight(80)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
 
-        catalog_group = QGroupBox("Item Catalog")
+        # --- Left Panel: Catalog & Quick Add ---
+        catalog_group = QWidget()
+        catalog_group.setObjectName("BillingCatalogGroup")
         catalog_layout = QVBoxLayout(catalog_group)
-        catalog_layout.setSpacing(8)
+        catalog_layout.setContentsMargins(10, 0, 10, 10)
+        catalog_layout.setSpacing(12)
 
-        search_row = QHBoxLayout()
-        search_row.setSpacing(8)
+        # Search Bar
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search item and press Enter...")
-        self.search_input.setMinimumHeight(36)
+        self.search_input.setPlaceholderText("🔍 Search items (Alt+F)...")
+        self.search_input.setObjectName("BillingSearch")
+        self.search_input.setMinimumHeight(40)
         self.search_input.textChanged.connect(self.apply_billing_filter)
-        self.search_input.returnPressed.connect(self.add_selected_item_to_cart)
-        search_row.addWidget(QLabel("<b>Search</b>"))
-        search_row.addWidget(self.search_input)
-        catalog_layout.addLayout(search_row)
+        catalog_layout.addWidget(self.search_input)
 
+        # Tabs Scroll Area
+        self.billing_category_tabs_layout = QHBoxLayout()
+        self.billing_category_tabs_layout.setSpacing(10)
+        self.billing_category_tabs_layout.setAlignment(Qt.AlignLeft)
+        category_container = QWidget()
+        category_container.setObjectName("BillingCategoryContainer")
+        category_container.setLayout(self.billing_category_tabs_layout)
+        category_scroll = QScrollArea()
+        category_scroll.setWidgetResizable(True)
+        category_scroll.setMaximumHeight(65)
+        category_scroll.setFrameShape(QFrame.NoFrame)
+        category_scroll.setWidget(category_container)
+        category_scroll.setFixedHeight(65)
+        catalog_layout.addWidget(category_scroll, 0)
+
+        # Grid Scroll Area
+        self.billing_quick_grid_layout = QGridLayout()
+        self.billing_quick_grid_layout.setSpacing(14)
+        self.billing_quick_grid_layout.setContentsMargins(16, 16, 16, 16)
+        self.billing_quick_grid_layout.setAlignment(Qt.AlignTop)
+
+        grid_container = QWidget()
+        grid_container.setObjectName("BillingGridContainer")
+        grid_container.setLayout(self.billing_quick_grid_layout)
+
+        grid_scroll = QScrollArea()
+        grid_scroll.setObjectName("BillingGridScroll")
+        grid_scroll.setWidgetResizable(True)
+        grid_scroll.setFrameShape(QFrame.NoFrame)
+        grid_scroll.setWidget(grid_container)
+        grid_scroll.setMinimumHeight(400)
+        catalog_layout.addWidget(grid_scroll, 1)
+        
         self.billing_empty_state_label = QLabel("")
-        self.billing_empty_state_label.setObjectName("BillingEmptyState")
         self.billing_empty_state_label.setVisible(False)
-        catalog_layout.addWidget(self.billing_empty_state_label)
 
-        self.billing_items_table = QTableWidget(0, 3)
-        self.billing_items_table.setHorizontalHeaderLabels(["Name", "Price", "Stock"])
-        self.billing_items_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.billing_items_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.billing_items_table.horizontalHeader().setStretchLastSection(True)
-        self.billing_items_table.cellDoubleClicked.connect(self._on_catalog_double_click)
-        self.billing_items_table.cellClicked.connect(self._on_catalog_single_click)
-        self._style_billing_table(self.billing_items_table)
-
-        quick_group = QGroupBox("Quick Add")
-        self.billing_quick_group = quick_group
-        quick_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        quick_group.setMaximumHeight(270)
-        quick_layout = QVBoxLayout(quick_group)
-        quick_layout.setSpacing(6)
-
-        self.small_buttons_layout = QHBoxLayout()
-        self.medium_buttons_layout = QHBoxLayout()
-        self.big_buttons_layout = QHBoxLayout()
-        self.small_buttons_layout.setSpacing(8)
-        self.medium_buttons_layout.setSpacing(8)
-        self.big_buttons_layout.setSpacing(8)
-
-        quick_layout.addWidget(QLabel("SMALL"))
-        quick_layout.addLayout(self.small_buttons_layout)
-        quick_layout.addWidget(QLabel("MEDIUM"))
-        quick_layout.addLayout(self.medium_buttons_layout)
-        quick_layout.addWidget(QLabel("BIG"))
-        quick_layout.addLayout(self.big_buttons_layout)
-
-        catalog_layout.addWidget(quick_group, 0)
-        catalog_layout.addWidget(self.billing_items_table, 1)
-
-        controls = QHBoxLayout()
-        self.qty_spin = QDoubleSpinBox()
-        self.qty_spin.setDecimals(2)
-        self.qty_spin.setMinimum(0.01)
-        self.qty_spin.setMaximum(1000)
-        self.qty_spin.setValue(1)
-        self.qty_spin.setMinimumHeight(34)
-
-        add_btn = QPushButton("Add Selected")
-        add_btn.setObjectName("SecondaryBillingButton")
-        add_btn.clicked.connect(self.add_selected_item_to_cart)
-
-        refresh_btn = QPushButton("Refresh Items")
-        refresh_btn.setObjectName("SecondaryBillingButton")
-        refresh_btn.clicked.connect(self.refresh_billing_items)
-
-        self.billing_compact_toggle = QCheckBox("Compact for Small Screens")
-        self.billing_compact_toggle.toggled.connect(self._set_billing_compact_mode)
-
-        controls.addWidget(QLabel("<b>Qty</b>"))
-        controls.addWidget(self.qty_spin)
-        controls.addWidget(add_btn)
-        controls.addWidget(refresh_btn)
-        controls.addStretch()
-        controls.addWidget(self.billing_compact_toggle)
-        catalog_layout.addLayout(controls)
-        catalog_layout.setStretch(3, 1)
-
-        cart_group = QGroupBox("Current Bill")
+        # --- Right Panel: Cart & Payment ---
+        cart_group = QWidget()
+        cart_group.setObjectName("BillingCartGroup")
         cart_layout = QVBoxLayout(cart_group)
+        cart_layout.setContentsMargins(10, 10, 10, 10)
         cart_layout.setSpacing(10)
 
-        self.cart_table = QTableWidget(0, 5)
-        self.cart_table.setHorizontalHeaderLabels(["Item ID", "Name", "Qty", "Unit", "Line Total"])
+        cart_header = QHBoxLayout()
+        cart_title = QLabel("Current Bill")
+        cart_title.setObjectName("BillingPanelTitle")
+        self.cart_summary_label = QLabel("0 lines | 0.00 units")
+        self.cart_summary_label.setObjectName("BillingPanelMeta")
+        cart_header.addWidget(cart_title)
+        cart_header.addStretch()
+        cart_header.addWidget(self.cart_summary_label)
+
+        self.cart_table = QTableWidget(0, 4)
+        self.cart_table.setHorizontalHeaderLabels(["Item Name", "Qty", "Price", "Total"])
         self.cart_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.cart_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.cart_table.horizontalHeader().setStretchLastSection(True)
+        self.cart_table.verticalHeader().setDefaultSectionSize(48)
         self._style_billing_table(self.cart_table)
-        self.cart_table.setMinimumHeight(360)
+
+        self.cart_empty_label = QLabel("No items in bill")
+        self.cart_empty_label.setObjectName("CartEmptyState")
+        self.cart_empty_label.setAlignment(Qt.AlignCenter)
 
         cart_actions_row = QHBoxLayout()
         plus_qty_btn = QPushButton("+ Qty")
-        plus_qty_btn.setObjectName("SecondaryBillingButton")
+        plus_qty_btn.setObjectName("StandardAction")
         plus_qty_btn.clicked.connect(self.increase_selected_cart_item_qty)
-
         minus_qty_btn = QPushButton("- Qty")
-        minus_qty_btn.setObjectName("SecondaryBillingButton")
+        minus_qty_btn.setObjectName("StandardAction")
         minus_qty_btn.clicked.connect(self.decrease_selected_cart_item_qty)
-
-        remove_selected_btn = QPushButton("Remove Selected")
-        remove_selected_btn.setObjectName("SecondaryBillingButton")
+        remove_selected_btn = QPushButton("Remove")
+        remove_selected_btn.setObjectName("DangerAction")
         remove_selected_btn.clicked.connect(self.remove_selected_cart_item)
+        clear_btn = QPushButton("Clear Cart")
+        clear_btn.setObjectName("DangerAction")
+        clear_btn.clicked.connect(self.clear_cart)
 
         cart_actions_row.addWidget(plus_qty_btn)
         cart_actions_row.addWidget(minus_qty_btn)
-        cart_actions_row.addWidget(remove_selected_btn)
         cart_actions_row.addStretch()
+        cart_actions_row.addWidget(remove_selected_btn)
+        cart_actions_row.addWidget(clear_btn)
 
+        # Payment Panel
         total_panel = QFrame()
         total_panel.setObjectName("BillingTotalPanel")
         total_panel_layout = QVBoxLayout(total_panel)
-        total_panel_layout.setContentsMargins(10, 10, 10, 10)
-        total_panel_layout.setSpacing(8)
+        total_panel_layout.setContentsMargins(5, 5, 5, 5)
+        total_panel_layout.setSpacing(12)
 
         self.total_label = QLabel("TOTAL: INR 0.00")
         self.total_label.setObjectName("BillingTotalLabel")
         self.total_label.setAlignment(Qt.AlignCenter)
+        
+        pay_row = QHBoxLayout()
+        pay_row.setSpacing(10)
+        pay_cash_btn = QPushButton("Pay CASH")
+        pay_cash_btn.setObjectName("PayAction")
+        pay_cash_btn.setProperty("payment", "cash")
+        pay_cash_btn.clicked.connect(lambda: self._trigger_petpooja_checkout("cash"))
+        
+        pay_upi_btn = QPushButton("Pay UPI")
+        pay_upi_btn.setObjectName("PayAction")
+        pay_upi_btn.setProperty("payment", "upi")
+        pay_upi_btn.clicked.connect(lambda: self._trigger_petpooja_checkout("upi"))
+        
+        pay_card_btn = QPushButton("Pay CARD")
+        pay_card_btn.setObjectName("PayAction")
+        pay_card_btn.setProperty("payment", "card")
+        pay_card_btn.clicked.connect(lambda: self._trigger_petpooja_checkout("card"))
+        
+        pay_row.addWidget(pay_cash_btn)
+        pay_row.addWidget(pay_upi_btn)
+        pay_row.addWidget(pay_card_btn)
 
-        clear_btn = QPushButton("Clear Cart")
-        clear_btn.setObjectName("SecondaryBillingButton")
-        clear_btn.clicked.connect(self.clear_cart)
+        total_panel_layout.addWidget(self.total_label)
+        total_panel_layout.addLayout(pay_row)
+        
+        # Hidden defaults for compatibility with checkout logic
+        self.customer_name_input = QLineEdit()
+        self.customer_phone_input = QLineEdit()
+        self.payment_method_combo = QComboBox()
+        self.payment_method_combo.addItem("Cash", "cash")
+        self.payment_method_combo.addItem("UPI", "upi")
+        self.payment_method_combo.addItem("Card", "card")
 
-        checkout_btn = QPushButton("Generate Bill (Ctrl+Enter)")
-        checkout_btn.setObjectName("PrimaryBillingButton")
-        checkout_btn.setMinimumHeight(44)
-        checkout_btn.clicked.connect(self.checkout)
-
-        totals_row = QHBoxLayout()
-        totals_row.addWidget(self.total_label)
-        actions_row = QHBoxLayout()
-        actions_row.addWidget(clear_btn)
-        actions_row.addWidget(checkout_btn)
-
-        total_panel_layout.addLayout(totals_row)
-        total_panel_layout.addLayout(actions_row)
-
-        cart_layout.addWidget(self.cart_table)
+        cart_layout.addLayout(cart_header)
+        cart_layout.addWidget(self.cart_table, 1)
+        cart_layout.addWidget(self.cart_empty_label)
         cart_layout.addLayout(cart_actions_row)
-        cart_layout.addWidget(total_panel)
+        cart_layout.addWidget(total_panel, 0)
 
         splitter.addWidget(catalog_group)
         splitter.addWidget(cart_group)
-        splitter.setSizes([520, 780])
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 6)
+        # Use relative sizes for better scaling
+        splitter.setSizes([800, 400])
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 4)
 
-        root_layout.addWidget(hero_frame)
-        root_layout.addWidget(splitter)
+        root_layout.addWidget(hero_frame, 0)
+        root_layout.addWidget(splitter, 1)
         self.billing_root_layout = root_layout
         self.billing_splitter = splitter
         self._apply_billing_dashboard_style(tab)
@@ -506,7 +1143,9 @@ class MainWindow(QMainWindow):
         return tab
 
     def _focus_billing_search(self) -> None:
-        self.tabs.setCurrentIndex(0)
+        billing_index = self.tabs.indexOf(self.billing_tab)
+        if billing_index >= 0:
+            self.tabs.setCurrentIndex(billing_index)
         if hasattr(self, "search_input"):
             self.search_input.setFocus()
             self.search_input.selectAll()
@@ -517,19 +1156,26 @@ class MainWindow(QMainWindow):
             self.item_name_input.selectAll()
 
     def _focus_billing_qty(self) -> None:
-        self.tabs.setCurrentIndex(0)
+        billing_index = self.tabs.indexOf(self.billing_tab)
+        if billing_index >= 0:
+            self.tabs.setCurrentIndex(billing_index)
         if hasattr(self, "qty_spin"):
             self.qty_spin.setFocus()
             self.qty_spin.selectAll()
+        elif hasattr(self, "search_input"):
+            self.search_input.setFocus()
+            self.search_input.selectAll()
 
     def _try_checkout_from_enter(self) -> None:
-        if self.tabs.currentIndex() != 0:
+        if self.tabs.currentWidget() is not self.billing_tab:
             return
 
         focused = self.focusWidget()
         if focused is self.search_input:
             return
-        if focused is self.qty_spin or focused is self.qty_spin.lineEdit():
+        if hasattr(self, "qty_spin") and (
+            focused is self.qty_spin or focused is self.qty_spin.lineEdit()
+        ):
             return
         self.checkout()
 
@@ -538,429 +1184,238 @@ class MainWindow(QMainWindow):
             return
 
         compact = bool(enabled)
-        if compact:
-            self.billing_root_layout.setContentsMargins(6, 6, 6, 6)
-        else:
-            self.billing_root_layout.setContentsMargins(10, 10, 10, 10)
-        self.billing_root_layout.setSpacing(6 if compact else 10)
-
-        if hasattr(self, "billing_quick_group"):
-            self.billing_quick_group.setVisible(not compact)
-
-        row_height = 30 if compact else 38
-        self.billing_items_table.verticalHeader().setDefaultSectionSize(row_height)
-        self.cart_table.verticalHeader().setDefaultSectionSize(34 if compact else 40)
+        # Update vertical spacing
+        self.billing_root_layout.setSpacing(4 if compact else 8)
+        
+        if hasattr(self, "cart_table"):
+            self.cart_table.verticalHeader().setDefaultSectionSize(32 if compact else 40)
 
         if hasattr(self, "billing_splitter"):
-            self.billing_splitter.setSizes([470, 760] if compact else [520, 780])
+            # Ratios 3:2 for catalog:cart
+            total_w = self.billing_splitter.width()
+            if total_w > 100:
+                left = int(total_w * (0.65 if compact else 0.6))
+                right = total_w - left
+                self.billing_splitter.setSizes([left, right])
 
     def _make_billing_stat_card(self, heading: str) -> tuple[QFrame, QLabel]:
-        card = QFrame()
-        card.setObjectName("BillingStatCard")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(2)
-
-        title = QLabel(heading)
-        title.setObjectName("BillingStatTitle")
-        value = QLabel("0")
-        value.setObjectName("BillingStatValue")
-
-        layout.addWidget(title)
-        layout.addWidget(value)
-        return card, value
+        return make_billing_stat_card(self, heading)
 
     def _style_billing_table(self, table: QTableWidget) -> None:
-        table.setAlternatingRowColors(True)
-        table.verticalHeader().setVisible(False)
-        table.setWordWrap(False)
-        table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        table.horizontalHeader().setMinimumSectionSize(72)
-        table.horizontalHeader().setDefaultSectionSize(132)
-        table.verticalHeader().setDefaultSectionSize(38)
+        style_billing_table(table)
 
     def _apply_billing_dashboard_style(self, tab: QWidget) -> None:
-        tab.setStyleSheet(
-            "#BillingHero {"
-            "border: 1px solid #3a4457;"
-            "border-radius: 8px;"
-            "background-color: #222a37;"
-            "}"
-            "#BillingHeroTitle {"
-            "font-size: 18px;"
-            "font-weight: 700;"
-            "color: #f2f7ff;"
-            "}"
-            "#BillingEmptyState {"
-            "padding: 6px 10px;"
-            "border: 1px dashed #57627c;"
-            "border-radius: 6px;"
-            "color: #f1d4a6;"
-            "background-color: #2e2a20;"
-            "font-weight: 600;"
-            "}"
-            "#BillingStatCard {"
-            "border: 1px solid #3f4a60;"
-            "border-radius: 8px;"
-            "background-color: #1b2230;"
-            "min-width: 96px;"
-            "}"
-            "#BillingStatTitle {"
-            "font-size: 10px;"
-            "color: #9eb0cb;"
-            "}"
-            "#BillingStatValue {"
-            "font-size: 17px;"
-            "font-weight: 700;"
-            "color: #ffffff;"
-            "}"
-            "#BillingDashboard QGroupBox {"
-            "border: 1px solid #3a4252;"
-            "border-radius: 8px;"
-            "margin-top: 8px;"
-            "padding-top: 8px;"
-            "}"
-            "#BillingDashboard QGroupBox::title {"
-            "subcontrol-origin: margin;"
-            "left: 10px;"
-            "padding: 0 4px;"
-            "color: #dbe5f5;"
-            "font-weight: 600;"
-            "}"
-            "#BillingDashboard QTableWidget {"
-            "gridline-color: #2f4261;"
-            "alternate-background-color: #1b2942;"
-            "background-color: #152036;"
-            "border: 1px solid #385176;"
-            "border-radius: 6px;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "}"
-            "#BillingDashboard QTableWidget::item:hover {"
-            "background-color: #203a5f;"
-            "}"
-            "#BillingDashboard QHeaderView::section {"
-            "background-color: #233552;"
-            "color: #eaf1ff;"
-            "padding: 7px 9px;"
-            "border: 0px;"
-            "border-right: 1px solid #3f5980;"
-            "font-weight: 600;"
-            "}"
-            "#BillingDashboard QLineEdit,"
-            "#BillingDashboard QDoubleSpinBox,"
-            "#BillingDashboard QComboBox {"
-            "background-color: #131d2e;"
-            "color: #f2f6ff;"
-            "border: 1px solid #425a80;"
-            "border-radius: 6px;"
-            "padding: 6px 8px;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "}"
-            "#BillingDashboard QLineEdit::placeholder {"
-            "color: #90a4c8;"
-            "}"
-            "#BillingDashboard QComboBox::drop-down {"
-            "border: 0px;"
-            "width: 22px;"
-            "}"
-            "#BillingDashboard QComboBox QAbstractItemView {"
-            "background-color: #1a263c;"
-            "color: #edf3ff;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "border: 1px solid #435e88;"
-            "}"
-            "#BillingDashboard QPushButton {"
-            "background-color: #344055;"
-            "color: #eef3fb;"
-            "border: 1px solid #46546d;"
-            "border-radius: 8px;"
-            "padding: 8px 12px;"
-            "}"
-            "#BillingDashboard QPushButton:hover {"
-            "background-color: #3e4e68;"
-            "}"
-            "#BillingDashboard QLineEdit:focus,"
-            "#BillingDashboard QDoubleSpinBox:focus,"
-            "#BillingDashboard QTableWidget:focus,"
-            "#BillingDashboard QPushButton:focus,"
-            "#BillingDashboard QCheckBox:focus {"
-            "border: 1px solid #53b8ff;"
-            "outline: none;"
-            "background-color: #243047;"
-            "}"
-            "#BillingDashboard QPushButton#PrimaryBillingButton {"
-            "background-color: #1f8b4c;"
-            "border: 1px solid #25a55a;"
-            "color: white;"
-            "font-weight: 700;"
-            "}"
-            "#BillingDashboard QPushButton#PrimaryBillingButton:hover {"
-            "background-color: #26a059;"
-            "}"
-            "#BillingDashboard QPushButton#SecondaryBillingButton {"
-            "background-color: #2d3a50;"
-            "border: 1px solid #4a5872;"
-            "}"
-            "#BillingDashboard QPushButton#SecondaryBillingButton:hover {"
-            "background-color: #384964;"
-            "}"
-            "#BillingTotalPanel {"
-            "border: 1px solid #3b465b;"
-            "border-radius: 8px;"
-            "background-color: #1a2738;"
-            "}"
-            "#BillingTotalLabel {"
-            "font-size: 34px;"
-            "font-weight: 800;"
-            "color: #f5fbff;"
-            "}"
-        )
+        apply_billing_dashboard_style(self, tab)
+
+    def _apply_recipe_panel_style(self, tab: QWidget) -> None:
+        T = self.THEME
+        tab.setStyleSheet(f"""
+            #RecipePanel {{
+                background-color: {T['bg_deep']};
+            }}
+            #RecipePanel QGroupBox {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 12px;
+                background-color: {T['bg_surface']};
+                margin-top: 15px;
+                padding-top: 15px;
+            }}
+            #RecipeEmptyState {{
+                padding: 24px;
+                border: 2px dashed {T['border_bold']};
+                border-radius: 12px;
+                color: {T['text_medium']};
+                background-color: transparent;
+                font-weight: 700;
+                font-size: 13px;
+            }}
+            #RecipeStatValue {{
+                font-size: 24px;
+                font-weight: 900;
+                color: {T['accent_primary']};
+            }}
+            #RecipeStatTitle {{
+                font-size: 11px;
+                font-weight: 800;
+                color: {T['text_medium']};
+                text-transform: uppercase;
+            }}
+            #RecipeBuilderGroup, #RecipeLinesGroup, #RecipeAlertsGroup {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 12px;
+                background-color: {T['bg_surface']};
+            }}
+            #PrimaryRecipeButton {{
+                background-color: {T['accent_primary']};
+                color: white;
+                font-weight: 900;
+                font-size: 14px;
+                border-radius: 10px;
+                padding: 10px 18px;
+                border: none;
+            }}
+            #PrimaryRecipeButton:hover {{
+                background-color: #1d4ed8;
+            }}
+            #RecipeStepBadge {{
+                background-color: {T['bg_surface']};
+                border: 1.5px solid {T['accent_primary']};
+                border-radius: 20px;
+                color: {T['accent_primary']};
+                font-weight: 800;
+                font-size: 12px;
+                padding: 4px 14px;
+            }}
+            #RecipeStepArrow {{
+                color: {T['text_low']};
+                font-size: 18px;
+                font-weight: 700;
+            }}
+            #RecipeSummaryCard {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 10px;
+                background-color: {T['bg_surface']};
+                padding: 8px 14px;
+                font-weight: 800;
+                font-size: 13px;
+                color: {T['text_primary']};
+            }}
+            #RecipeSummaryCardAccent {{
+                border: 1.5px solid {T['accent_primary']};
+                border-radius: 10px;
+                background-color: #eff6ff;
+                padding: 8px 14px;
+                font-weight: 800;
+                font-size: 13px;
+                color: {T['accent_primary']};
+            }}
+            #RecipeDangerBtn {{
+                background-color: {T['bg_surface']};
+                color: {T['danger']};
+                border: 1.5px solid {T['danger']};
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-weight: 700;
+                font-size: 12px;
+            }}
+            #RecipeDangerBtn:hover {{
+                background-color: #fef2f2;
+            }}
+            #RecipeRefreshBtn {{
+                background-color: {T['bg_surface']};
+                color: {T['text_medium']};
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-weight: 700;
+            }}
+            #RecipeRefreshBtn:hover {{
+                background-color: {T['bg_deep']};
+            }}
+        """)
 
     def _apply_inventory_panel_style(self, tab: QWidget) -> None:
-        tab.setStyleSheet(
-            "#InventoryPanel QGroupBox {"
-            "border: 1px solid #3d475b;"
-            "border-radius: 8px;"
-            "margin-top: 8px;"
-            "padding-top: 8px;"
-            "}"
-            "#InventoryPanel QGroupBox::title {"
-            "subcontrol-origin: margin;"
-            "left: 8px;"
-            "padding: 0 4px;"
-            "font-weight: 600;"
-            "color: #d9e3f3;"
-            "}"
-            "#InventoryPanel QTableWidget {"
-            "gridline-color: #2f4261;"
-            "background-color: #152036;"
-            "alternate-background-color: #1b2942;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "border: 1px solid #385176;"
-            "border-radius: 6px;"
-            "}"
-            "#InventoryPanel QTableWidget::item:hover {"
-            "background-color: #203a5f;"
-            "}"
-            "#InventoryPanel QTableWidget::item:selected {"
-            "background-color: #2b77e7;"
-            "color: #ffffff;"
-            "}"
-            "#InventoryPanel QHeaderView::section {"
-            "background-color: #233552;"
-            "color: #eaf1ff;"
-            "padding: 7px 8px;"
-            "border: 0px;"
-            "border-right: 1px solid #3f5980;"
-            "font-weight: 600;"
-            "}"
-            "#InventoryPanel QLineEdit,"
-            "#InventoryPanel QDoubleSpinBox,"
-            "#InventoryPanel QComboBox {"
-            "background-color: #131d2e;"
-            "color: #f2f6ff;"
-            "border: 1px solid #425a80;"
-            "border-radius: 6px;"
-            "padding: 6px 8px;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "}"
-            "#InventoryPanel QLineEdit::placeholder {"
-            "color: #90a4c8;"
-            "}"
-            "#InventoryPanel QComboBox::drop-down {"
-            "border: 0px;"
-            "width: 22px;"
-            "}"
-            "#InventoryPanel QComboBox QAbstractItemView {"
-            "background-color: #1a263c;"
-            "color: #edf3ff;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "border: 1px solid #435e88;"
-            "}"
-            "#InventoryPanel QLineEdit:focus,"
-            "#InventoryPanel QDoubleSpinBox:focus,"
-            "#InventoryPanel QComboBox:focus {"
-            "border: 1px solid #55c2ff;"
-            "background-color: #1a2940;"
-            "}"
-            "#InventoryPanel QPushButton, #InventoryPanel QToolButton {"
-            "border-radius: 8px;"
-            "padding: 7px 12px;"
-            "border: 1px solid #4a5872;"
-            "background-color: #2d3a50;"
-            "color: #edf3fb;"
-            "}"
-            "#InventoryPanel QPushButton#PrimaryInventoryButton {"
-            "background-color: #1f8b4c;"
-            "border: 1px solid #25a55a;"
-            "font-weight: 700;"
-            "}"
-            "#InventoryPanel QPushButton#PrimaryInventoryButton:hover {"
-            "background-color: #26a059;"
-            "}"
-            "#InventoryInlineStatus {"
-            "color: #a8f0bc;"
-            "font-weight: 600;"
-            "padding-left: 2px;"
-            "}"
-            "#InventorySummaryCard, #InventorySummaryLow, #InventorySummaryOOS {"
-            "border: 1px solid #3f4b62;"
-            "border-radius: 8px;"
-            "background-color: #1e2838;"
-            "padding: 6px 10px;"
-            "font-weight: 600;"
-            "color: #d9e4f7;"
-            "}"
-            "#InventorySummaryLow {"
-            "border-color: #6f6130;"
-            "background-color: #2f2a1b;"
-            "color: #ffe9b2;"
-            "}"
-            "#InventorySummaryOOS {"
-            "border-color: #6b3e3e;"
-            "background-color: #2f2020;"
-            "color: #ffd4d4;"
-            "}"
-            "#InventoryEmptyState {"
-            "padding: 7px 10px;"
-            "border: 1px dashed #536179;"
-            "border-radius: 6px;"
-            "color: #f2d7a8;"
-            "background-color: #2e2a22;"
-            "}"
-        )
+        apply_inventory_panel_style(self, tab)
 
     def _apply_purchases_panel_style(self, tab: QWidget) -> None:
-        tab.setStyleSheet(
-            "#PurchasesPanel QGroupBox {"
-            "border: 1px solid #3f485b;"
-            "border-radius: 8px;"
-            "margin-top: 8px;"
-            "padding-top: 8px;"
-            "}"
-            "#PurchasesPanel QGroupBox::title {"
-            "subcontrol-origin: margin;"
-            "left: 8px;"
-            "padding: 0 4px;"
-            "font-weight: 600;"
-            "color: #dbe5f5;"
-            "}"
-            "#PurchasesPanel QTableWidget {"
-            "gridline-color: #2f4261;"
-            "background-color: #152036;"
-            "alternate-background-color: #1b2942;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "border: 1px solid #385176;"
-            "border-radius: 6px;"
-            "}"
-            "#PurchasesPanel QTableWidget::item:hover {"
-            "background-color: #203a5f;"
-            "}"
-            "#PurchasesPanel QHeaderView::section {"
-            "background-color: #233552;"
-            "color: #eaf1ff;"
-            "padding: 7px 8px;"
-            "border: 0px;"
-            "border-right: 1px solid #3f5980;"
-            "font-weight: 600;"
-            "}"
-            "#PurchasesPanel QLineEdit,"
-            "#PurchasesPanel QDoubleSpinBox,"
-            "#PurchasesPanel QComboBox,"
-            "#PurchasesPanel QDateEdit {"
-            "background-color: #131d2e;"
-            "color: #f2f6ff;"
-            "border: 1px solid #425a80;"
-            "border-radius: 6px;"
-            "padding: 6px 8px;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "}"
-            "#PurchasesPanel QLineEdit::placeholder {"
-            "color: #90a4c8;"
-            "}"
-            "#PurchasesPanel QComboBox::drop-down,"
-            "#PurchasesPanel QDateEdit::drop-down {"
-            "border: 0px;"
-            "width: 22px;"
-            "}"
-            "#PurchasesPanel QComboBox QAbstractItemView,"
-            "#PurchasesPanel QDateEdit QAbstractItemView {"
-            "background-color: #1a263c;"
-            "color: #edf3ff;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "border: 1px solid #435e88;"
-            "}"
-            "#PurchasesPanel QLineEdit:focus,"
-            "#PurchasesPanel QDoubleSpinBox:focus,"
-            "#PurchasesPanel QComboBox:focus,"
-            "#PurchasesPanel QDateEdit:focus {"
-            "border: 1px solid #55c2ff;"
-            "background-color: #1a2940;"
-            "}"
-            "#PurchasesPanel QPushButton {"
-            "border-radius: 8px;"
-            "padding: 7px 12px;"
-            "border: 1px solid #4a5872;"
-            "background-color: #2d3a50;"
-            "color: #edf3fb;"
-            "}"
-            "#PurchasesPanel QPushButton#PrimaryPurchaseButton {"
-            "background-color: #219552;"
-            "border: 1px solid #25a55a;"
-            "font-weight: 700;"
-            "padding: 10px 16px;"
-            "}"
-            "#PurchasesPanel QPushButton#PrimaryPurchaseButton:hover {"
-            "background-color: #2bb061;"
-            "border-color: #6fe3a5;"
-            "}"
-            "#PurchasesPanel QPushButton#SecondaryPurchaseButton {"
-            "background-color: #2d3a50;"
-            "}"
-            "#PurchasesPanel QPushButton#PurchaseFilterPreset:checked {"
-            "background-color: #3b4f72;"
-            "border-color: #6b87b8;"
-            "font-weight: 700;"
-            "}"
-            "#PurchaseTotalPanel {"
-            "border: 1px solid #3a465b;"
-            "border-radius: 8px;"
-            "background-color: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1e2b3e, stop:1 #1a2433);"
-            "}"
-            "#PurchaseTotalLabel {"
-            "font-size: 18px;"
-            "font-weight: 800;"
-            "color: #f4fbff;"
-            "}"
-            "#PurchaseEmptyState {"
-            "padding: 7px 10px;"
-            "border: 1px dashed #55627a;"
-            "border-radius: 6px;"
-            "background-color: #2c2a21;"
-            "color: #f2d9ab;"
-            "}"
-            "#PurchaseInlineFeedback {"
-            "color: #a9b8d1;"
-            "font-weight: 600;"
-            "}"
-            "#PurchaseStockPreview {"
-            "padding: 4px 8px;"
-            "border: 1px solid #446448;"
-            "border-radius: 6px;"
-            "background-color: #223626;"
-            "color: #b7f0c2;"
-            "font-weight: 700;"
-            "}"
-        )
+        T = self.THEME
+        tab.setStyleSheet(f"""
+            #PurchasesPanel {{
+                background-color: {T['bg_deep']};
+            }}
+            #PurchasesPanel QGroupBox {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 12px;
+                background-color: {T['bg_surface']};
+                margin-top: 15px;
+                padding-top: 15px;
+            }}
+            #PurchaseTotalPanel {{
+                background-color: {T['bg_surface']};
+                border: 2px solid {T['accent_primary']};
+                border-radius: 12px;
+                padding: 12px;
+            }}
+            #PurchaseTotalLabel {{
+                font-size: 28px;
+                font-weight: 900;
+                color: {T['accent_primary']};
+            }}
+            QPushButton#PurchaseFilterPreset {{
+                background-color: {T['bg_surface']};
+                color: {T['text_medium']};
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 15px;
+                padding: 6px 15px;
+                font-weight: 700;
+            }}
+            QPushButton#PurchaseFilterPreset:checked {{
+                background-color: {T['text_primary']};
+                color: white;
+                border-color: {T['text_primary']};
+            }}
+            #PurchaseEmptyState {{
+                padding: 24px;
+                border: 2px dashed {T['border_bold']};
+                border-radius: 12px;
+                color: {T['text_medium']};
+                background-color: transparent;
+                font-weight: 700;
+                font-size: 13px;
+            }}
+            #PurchaseInlineFeedback {{
+                color: {T['text_medium']};
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            #PurchaseStepBadge {{
+                background-color: {T['bg_surface']};
+                border: 1.5px solid {T['accent_primary']};
+                border-radius: 20px;
+                color: {T['accent_primary']};
+                font-weight: 800;
+                font-size: 12px;
+                padding: 4px 14px;
+            }}
+            #PurchaseStepArrow {{
+                color: {T['text_low']};
+                font-size: 18px;
+                font-weight: 700;
+            }}
+            #PurchaseSummaryCard {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 10px;
+                background-color: {T['bg_surface']};
+                padding: 6px 12px;
+                font-weight: 800;
+                font-size: 12px;
+                color: {T['text_primary']};
+            }}
+            #PurchaseDangerBtn {{
+                background-color: {T['bg_surface']};
+                color: {T['danger']};
+                border: 1.5px solid {T['danger']};
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-weight: 700;
+                font-size: 12px;
+            }}
+            #PurchaseDangerBtn:hover {{
+                background-color: #fef2f2;
+            }}
+            #PurchaseActionBtn {{
+                background-color: {T['bg_surface']};
+                color: {T['accent_primary']};
+                border: 1.5px solid {T['accent_primary']};
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-weight: 700;
+                font-size: 12px;
+            }}
+            #PurchaseActionBtn:hover {{
+                background-color: #eff6ff;
+            }}
+        """)
 
     def _show_selected_purchase_details(self, _item: QTableWidgetItem | None = None) -> None:
         selected = self.purchase_history_table.currentRow()
@@ -1066,7 +1521,8 @@ class MainWindow(QMainWindow):
         self.inventory_add_btn.setEnabled(is_valid)
 
     def _on_inventory_edit_started(self, item: QTableWidgetItem) -> None:
-        item.setBackground(QColor(50, 70, 108))
+        item.setBackground(QColor("#e2e8f0"))
+        item.setForeground(QColor(self.THEME['text_primary']))
         if hasattr(self, "inventory_inline_status_label"):
             self.inventory_inline_status_label.setText("Editing inline... press Enter to save.")
             self.inventory_inline_status_label.setVisible(True)
@@ -1083,39 +1539,29 @@ class MainWindow(QMainWindow):
         return int(item_id)
 
     def _update_low_stock_panel(self, items: list[dict]) -> None:
-        if not hasattr(self, "low_stock_list"):
+        if not hasattr(self, "inventory_low_stock_banner"):
             return
 
-        self.low_stock_list.clear()
         low_stock_items = [
             i for i in items if float(i.get("stock_quantity", 0)) <= float(i.get("reorder_level", 0))
         ]
-        low_stock_items.sort(key=lambda x: float(x.get("stock_quantity", 0)))
-
+        
         if not low_stock_items:
-            self.low_stock_list.addItem(QListWidgetItem("No low stock alerts"))
+            self.inventory_low_stock_banner.setVisible(False)
             return
 
-        grouped: dict[str, dict[str, float]] = {}
-        for item in low_stock_items:
-            name = item.get("name", "-")
-            stock = float(item.get("stock_quantity", 0))
-            current = grouped.get(name)
-            if current is None:
-                grouped[name] = {"count": 1, "min_stock": stock}
-            else:
-                current["count"] += 1
-                current["min_stock"] = min(current["min_stock"], stock)
-
-        sorted_rows = sorted(grouped.items(), key=lambda kv: (-kv[1]["count"], kv[0].lower()))
-        for name, info in sorted_rows[:12]:
-            if info["count"] > 1:
-                status = f"{name} -> {int(info['count'])} variants low"
-            else:
-                status = f"{name} ({info['min_stock']:.2f} left)"
-            entry = QListWidgetItem(status)
-            entry.setData(Qt.UserRole, name)
-            self.low_stock_list.addItem(entry)
+        out_of_stock = sum(1 for i in low_stock_items if float(i.get("stock_quantity", 0)) <= 0)
+        low_stock = len(low_stock_items) - out_of_stock
+        
+        alerts = []
+        if out_of_stock > 0:
+            alerts.append(f"\U0001f534 {out_of_stock} items PREPARE TO 86 (Out of Stock!)")
+        if low_stock > 0:
+            alerts.append(f"\U0001f7e1 {low_stock} items LOW STOCK")
+            
+        alert_text = "   |   ".join(alerts)
+        self.inventory_low_stock_banner.setText(f"\u26a0\ufe0f ACTION REQUIRED: {alert_text}")
+        self.inventory_low_stock_banner.setVisible(True)
 
     def _on_low_stock_item_clicked(self, item: QListWidgetItem) -> None:
         name = item.data(Qt.UserRole)
@@ -1129,19 +1575,16 @@ class MainWindow(QMainWindow):
             return
 
         total_count = len(items)
-        low_stock_count = 0
-        out_of_stock_count = 0
-        for item in items:
-            stock = float(item.get("stock_quantity", 0))
-            reorder = float(item.get("reorder_level", 0))
-            if stock <= 0:
-                out_of_stock_count += 1
-            if stock <= reorder:
-                low_stock_count += 1
+        counts = self.inventory_controller.summary_counts(items)
+        low_stock_count = counts["low"]
+        out_of_stock_count = counts["out"]
+        reorder_alerts_count = counts["reorder"]
 
         self.inventory_summary_total.setText(f"Total Items: {total_count}")
         self.inventory_summary_low.setText(f"Low Stock: {low_stock_count}")
         self.inventory_summary_oos.setText(f"Out of Stock: {out_of_stock_count}")
+        if hasattr(self, "inventory_summary_reorder"):
+            self.inventory_summary_reorder.setText(f"Reorder Alerts: {reorder_alerts_count}")
 
     def apply_inventory_filter(self) -> None:
         if not hasattr(self, "inventory_items_cache"):
@@ -1155,8 +1598,8 @@ class MainWindow(QMainWindow):
         for item in self.inventory_items_cache:
             name = item.get("name", "")
             item_category_id = item.get("category_id")
-            stock = float(item.get("stock_quantity", 0))
-            reorder = float(item.get("reorder_level", 0))
+            stock = self._f(item.get("stock_quantity"))
+            reorder = self._f(item.get("reorder_level"))
 
             if query and query not in name.lower():
                 continue
@@ -1192,13 +1635,16 @@ class MainWindow(QMainWindow):
             costing_item.setFlags(costing_item.flags() & ~Qt.ItemIsEditable)
             table.setItem(row_index, 3, costing_item)
 
-            sell_item = QTableWidgetItem(f"{float(item['selling_price']):.2f}")
+            sell_item = QTableWidgetItem(f"{self._f(item.get('selling_price')):.2f}")
             sell_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             table.setItem(row_index, 4, sell_item)
 
-            stock_value = float(item["stock_quantity"])
-            reorder_value = float(item["reorder_level"])
-            stock_item = QTableWidgetItem(f"{stock_value:.2f}")
+            stock_value = self._f(item.get("stock_quantity"))
+            reorder_value = self._f(item.get("reorder_level"))
+            
+            stock_text, _, _ = self.inventory_controller.stock_status(stock_value, reorder_value)
+                
+            stock_item = QTableWidgetItem(stock_text)
             stock_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             stock_item.setFlags(stock_item.flags() & ~Qt.ItemIsEditable)
             table.setItem(row_index, 5, stock_item)
@@ -1213,15 +1659,22 @@ class MainWindow(QMainWindow):
             actions_layout.setSpacing(4)
 
             restock_btn = QToolButton()
-            restock_btn.setText("+Stock")
+            restock_btn.setObjectName("StandardAction")
+            restock_btn.setText("Stock +")
+            restock_btn.setMinimumWidth(84)
+            restock_btn.setToolTip("Quick stock adjust")
             restock_btn.clicked.connect(lambda _, item_id=int(item["id"]): self._quick_restock_inventory_item(item_id))
 
             edit_btn = QToolButton()
+            edit_btn.setObjectName("StandardAction")
             edit_btn.setText("Edit")
+            edit_btn.setMinimumWidth(64)
             edit_btn.clicked.connect(lambda _, item_id=int(item["id"]): self._edit_inventory_item_by_id(item_id))
 
             delete_btn = QToolButton()
+            delete_btn.setObjectName("DangerAction")
             delete_btn.setText("Delete")
+            delete_btn.setMinimumWidth(72)
             delete_btn.clicked.connect(lambda _, item_id=int(item["id"]): self._delete_inventory_item_by_id(item_id))
 
             actions_layout.addWidget(restock_btn)
@@ -1230,12 +1683,7 @@ class MainWindow(QMainWindow):
             actions_layout.addStretch()
             table.setCellWidget(row_index, 7, actions_cell)
 
-            if stock_value <= 0:
-                stock_item.setBackground(QColor("#3a1f1f"))
-                stock_item.setForeground(QColor(255, 232, 232))
-            elif stock_value < reorder_value:
-                stock_item.setBackground(QColor("#3a3420"))
-                stock_item.setForeground(QColor(255, 245, 204))
+            self.inventory_controller.apply_stock_status(stock_item, stock_value, reorder_value)
 
         table.setSortingEnabled(True)
 
@@ -1296,239 +1744,627 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Quick Restock", str(exc))
             return
 
-        self.refresh_inventory()
-        self.refresh_billing_items()
-        self.refresh_reports()
-        self.inventory_inline_status_label.setText(f"Stock added: {item['name']} +{add_qty:.2f}")
+        self.inventory_inline_status_label.setText(f"Restocked {item['name']} +{add_qty:.2f}")
         self.inventory_inline_status_label.setVisible(True)
         QTimer.singleShot(2200, lambda: self.inventory_inline_status_label.setVisible(False))
+        self.refresh_inventory()
+        self.refresh_billing_items()
 
-    def _build_inventory_tab(self) -> QWidget:
+    def _build_recipe_tab(self) -> QWidget:
         tab = QWidget()
-        tab.setObjectName("InventoryPanel")
+        tab.setObjectName("RecipeTabRoot")
         root_layout = QVBoxLayout(tab)
-        root_layout.setContentsMargins(10, 10, 10, 10)
-        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(0, 0, 0, 0)
 
-        form_group = QGroupBox("Add Item")
-        form_layout = QGridLayout(form_group)
-        form_layout.setHorizontalSpacing(10)
-        form_layout.setVerticalSpacing(8)
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QFrame.NoFrame)
+        
+        main_content = QWidget()
+        main_content.setObjectName("RecipePanel")
+        content_layout = QVBoxLayout(main_content)
+        content_layout.setContentsMargins(15, 15, 15, 15)
+        content_layout.setSpacing(15)
 
-        basic_group = QGroupBox("Basic Info")
-        basic_layout = QGridLayout(basic_group)
+        # --- Step Badges ---
+        steps_row = QHBoxLayout()
+        steps_row.setSpacing(6)
+        for idx, (label, icon) in enumerate([
+            ("1  Select Product", "📦"),
+            ("2  Add Ingredients", "🧪"),
+            ("3  Save Recipe", "💾"),
+        ]):
+            badge = QLabel(f"{icon}  {label}")
+            badge.setObjectName("RecipeStepBadge")
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setMinimumHeight(32)
+            steps_row.addWidget(badge)
+            if idx < 2:
+                arrow = QLabel("→")
+                arrow.setObjectName("RecipeStepArrow")
+                arrow.setAlignment(Qt.AlignCenter)
+                steps_row.addWidget(arrow)
+        steps_row.addStretch()
 
-        pricing_group = QGroupBox("Pricing")
-        pricing_layout = QGridLayout(pricing_group)
+        # --- Top Section: Recipe Builder ---
+        builder_box = QGroupBox("Recipe Builder")
+        builder_box.setObjectName("RecipeBuilderGroup")
+        builder_layout = QGridLayout(builder_box)
+        builder_layout.setHorizontalSpacing(10)
+        builder_layout.setVerticalSpacing(8)
 
-        stock_group = QGroupBox("Stock")
-        stock_layout = QGridLayout(stock_group)
+        self.recipe_product_combo = QComboBox()
+        self.recipe_product_combo.currentIndexChanged.connect(self.load_selected_recipe_in_tab)
+        self.recipe_product_combo.setMinimumHeight(34)
+        
+        self.recipe_yield_spin = QDoubleSpinBox()
+        self.recipe_yield_spin.setDecimals(3)
+        self.recipe_yield_spin.setMinimum(0.001)
+        self.recipe_yield_spin.setMaximum(100000)
+        self.recipe_yield_spin.setValue(1.0)
+        self.recipe_yield_spin.setMaximumWidth(130)
+        self.recipe_yield_spin.setMinimumHeight(34)
 
-        self.item_name_input = QLineEdit()
-        self.item_name_input.setPlaceholderText("Item name")
-        self.item_name_input.returnPressed.connect(self.add_inventory_item)
-        self.category_combo = QComboBox()
-        self.item_kind_combo = QComboBox()
-        self.item_kind_combo.addItem("Sellable", "sellable")
-        self.item_kind_combo.addItem("Ingredient", "ingredient")
-        self.costing_mode_combo = QComboBox()
-        self.costing_mode_combo.addItem("Manual Cost", "manual")
-        self.costing_mode_combo.addItem("Recipe Cost", "recipe")
-        self.unit_name_input = QLineEdit("pcs")
-        self.unit_name_input.setPlaceholderText("Unit (pcs, g, ml, etc.)")
-        self.stock_tracked_checkbox = QCheckBox("Track stock")
-        self.stock_tracked_checkbox.setChecked(True)
+        recipe_refresh_btn = QPushButton("↻ Refresh")
+        recipe_refresh_btn.setObjectName("RecipeRefreshBtn")
+        recipe_refresh_btn.setMinimumHeight(34)
+        recipe_refresh_btn.clicked.connect(self.refresh_recipe_tab)
 
-        self.sell_price_spin = QDoubleSpinBox()
-        self.sell_price_spin.setMaximum(100000)
-        self.sell_price_spin.setPrefix("INR ")
+        self.recipe_builder_ingredient_combo = QComboBox()
+        self.recipe_builder_ingredient_combo.setMinimumHeight(34)
+        self.recipe_builder_qty_spin = QDoubleSpinBox()
+        self.recipe_builder_qty_spin.setDecimals(4)
+        self.recipe_builder_qty_spin.setMinimum(0.0001)
+        self.recipe_builder_qty_spin.setMaximum(100000)
+        self.recipe_builder_qty_spin.setValue(1.0)
+        self.recipe_builder_qty_spin.setMaximumWidth(130)
+        self.recipe_builder_qty_spin.setMinimumHeight(34)
+        
+        self.recipe_builder_waste_spin = QDoubleSpinBox()
+        self.recipe_builder_waste_spin.setDecimals(2)
+        self.recipe_builder_waste_spin.setMinimum(0)
+        self.recipe_builder_waste_spin.setMaximum(100)
+        self.recipe_builder_waste_spin.setValue(0.0)
+        self.recipe_builder_waste_spin.setMaximumWidth(130)
+        self.recipe_builder_waste_spin.setMinimumHeight(34)
 
-        self.cost_price_spin = QDoubleSpinBox()
-        self.cost_price_spin.setMaximum(100000)
-        self.cost_price_spin.setPrefix("INR ")
+        add_line_btn = QPushButton("+ Add Ingredient to Recipe")
+        add_line_btn.setObjectName("PrimaryRecipeButton")
+        add_line_btn.setMinimumHeight(42)
+        add_line_btn.setMinimumWidth(260)
+        add_line_btn.clicked.connect(lambda: self._add_recipe_line_row())
 
-        self.stock_spin = QDoubleSpinBox()
-        self.stock_spin.setMaximum(100000)
+        builder_layout.addWidget(QLabel("<b>Sellable Product</b>"), 0, 0)
+        builder_layout.addWidget(self.recipe_product_combo, 0, 1, 1, 3)
+        builder_layout.addWidget(QLabel("<b>Yield Qty</b>"), 0, 4)
+        builder_layout.addWidget(self.recipe_yield_spin, 0, 5)
+        builder_layout.addWidget(recipe_refresh_btn, 0, 6)
+        
+        builder_layout.addWidget(QLabel("<b>Ingredient</b>"), 1, 0)
+        builder_layout.addWidget(self.recipe_builder_ingredient_combo, 1, 1, 1, 3)
+        builder_layout.addWidget(QLabel("<b>Qty Used</b>"), 1, 4)
+        builder_layout.addWidget(self.recipe_builder_qty_spin, 1, 5)
+        builder_layout.addWidget(QLabel("<b>Waste %</b>"), 1, 6)
+        builder_layout.addWidget(self.recipe_builder_waste_spin, 1, 7)
 
-        self.reorder_spin = QDoubleSpinBox()
-        self.reorder_spin.setMaximum(100000)
+        add_line_row = QHBoxLayout()
+        add_line_row.addStretch()
+        add_line_row.addWidget(add_line_btn)
+        builder_layout.addLayout(add_line_row, 2, 0, 1, 8)
+        builder_box.setMaximumHeight(220)
 
-        self.inventory_add_btn = QPushButton("+ Add Item")
-        self.inventory_add_btn.setObjectName("PrimaryInventoryButton")
-        self.inventory_add_btn.setMinimumHeight(40)
-        self.inventory_add_btn.setMinimumWidth(126)
-        self.inventory_add_btn.clicked.connect(self.add_inventory_item)
+        # --- Table Section ---
+        recipe_lines_box = QGroupBox("Recipe Ingredients")
+        recipe_lines_box.setObjectName("RecipeLinesGroup")
+        recipe_lines_layout = QVBoxLayout(recipe_lines_box)
+        recipe_lines_layout.setContentsMargins(10, 10, 10, 10)
+        recipe_lines_layout.setSpacing(8)
 
-        basic_layout.addWidget(QLabel("<b>Name</b>"), 0, 0)
-        basic_layout.addWidget(self.item_name_input, 0, 1)
-        basic_layout.addWidget(QLabel("<b>Category</b>"), 1, 0)
-        basic_layout.addWidget(self.category_combo, 1, 1)
-        basic_layout.addWidget(QLabel("<b>Kind</b>"), 2, 0)
-        basic_layout.addWidget(self.item_kind_combo, 2, 1)
-        basic_layout.addWidget(QLabel("<b>Unit</b>"), 3, 0)
-        basic_layout.addWidget(self.unit_name_input, 3, 1)
-
-        pricing_layout.addWidget(QLabel("<b>Selling Price</b>"), 0, 0)
-        pricing_layout.addWidget(self.sell_price_spin, 0, 1)
-        pricing_layout.addWidget(QLabel("<b>Cost Price</b>"), 1, 0)
-        pricing_layout.addWidget(self.cost_price_spin, 1, 1)
-        pricing_layout.addWidget(QLabel("<b>Costing</b>"), 2, 0)
-        pricing_layout.addWidget(self.costing_mode_combo, 2, 1)
-        pricing_layout.addWidget(self.stock_tracked_checkbox, 3, 1)
-
-        stock_layout.addWidget(QLabel("<b>Opening Stock</b>"), 0, 0)
-        stock_layout.addWidget(self.stock_spin, 0, 1)
-        stock_layout.addWidget(QLabel("<b>Reorder Level</b>"), 1, 0)
-        stock_layout.addWidget(self.reorder_spin, 1, 1)
-
-        divider = QFrame()
-        divider.setFrameShape(QFrame.HLine)
-        divider.setFrameShadow(QFrame.Sunken)
-
-        add_row = QHBoxLayout()
-        add_row.setContentsMargins(0, 4, 0, 0)
-        add_row.addStretch()
-        add_row.addWidget(self.inventory_add_btn)
-
-        form_layout.addWidget(basic_group, 0, 0)
-        form_layout.addWidget(pricing_group, 0, 1)
-        form_layout.addWidget(stock_group, 0, 2)
-        form_layout.addWidget(divider, 1, 0, 1, 3)
-        form_layout.addLayout(add_row, 2, 0, 1, 3)
-
-        inventory_hint = QLabel(
-            "Tip: Double-click Sell/Reorder to edit inline. Red=out of stock, Yellow=below reorder."
-        )
-
-        filter_row = QHBoxLayout()
-        filter_row.setContentsMargins(0, 0, 0, 0)
-        filter_row.setSpacing(8)
-        self.inventory_search_input = QLineEdit()
-        self.inventory_search_input.setPlaceholderText("Search item (name, category)...")
-        self.inventory_search_input.setClearButtonEnabled(True)
-        self.inventory_search_input.setMinimumHeight(34)
-        self.inventory_search_input.textChanged.connect(self.apply_inventory_filter)
-        self.inventory_filter_category_combo = QComboBox()
-        self.inventory_filter_category_combo.addItem("All Categories", None)
-        self.inventory_filter_category_combo.setMinimumWidth(220)
-        self.inventory_filter_category_combo.setMinimumHeight(34)
-        self.inventory_filter_category_combo.currentIndexChanged.connect(self.apply_inventory_filter)
-        self.inventory_low_stock_only_checkbox = QCheckBox("Low Stock Only")
-        self.inventory_low_stock_only_checkbox.toggled.connect(self.apply_inventory_filter)
-        filter_row.addWidget(self.inventory_search_input, 2)
-        filter_row.addWidget(QLabel("<b>Category</b>"))
-        filter_row.addWidget(self.inventory_filter_category_combo, 1)
-        filter_row.addWidget(self.inventory_low_stock_only_checkbox)
-
-        summary_row = QHBoxLayout()
-        self.inventory_summary_total = QLabel("Total Items: 0")
-        self.inventory_summary_total.setObjectName("InventorySummaryCard")
-        self.inventory_summary_low = QLabel("Low Stock: 0")
-        self.inventory_summary_low.setObjectName("InventorySummaryLow")
-        self.inventory_summary_oos = QLabel("Out of Stock: 0")
-        self.inventory_summary_oos.setObjectName("InventorySummaryOOS")
-        summary_row.addWidget(self.inventory_summary_total)
-        summary_row.addWidget(self.inventory_summary_low)
-        summary_row.addWidget(self.inventory_summary_oos)
-        summary_row.addStretch()
-
-        table_area_layout = QHBoxLayout()
-        table_area_layout.setSpacing(10)
-
-        self.inventory_items_table = QTableWidget(0, 8)
-        self.inventory_items_table.setHorizontalHeaderLabels(
-            ["Name", "Category", "Kind", "Costing", "Sell", "Stock", "Reorder", "Actions"]
-        )
-        self.inventory_items_table.setEditTriggers(
+        self.recipe_lines_table = QTableWidget(0, 5)
+        self.recipe_lines_table.setHorizontalHeaderLabels(["Ingredient", "Qty Used", "Waste %", "Unit Cost", "Line Cost"])
+        self.recipe_lines_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.recipe_lines_table.setEditTriggers(
             QTableWidget.DoubleClicked | QTableWidget.SelectedClicked | QTableWidget.EditKeyPressed
         )
-        self.inventory_items_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.inventory_items_table.itemChanged.connect(self._on_inventory_item_changed)
-        self.inventory_items_table.itemDoubleClicked.connect(self._on_inventory_edit_started)
-        self.inventory_items_table.setSortingEnabled(True)
-        self.inventory_items_table.horizontalHeader().setStretchLastSection(False)
-        self.inventory_items_table.horizontalHeader().setMinimumSectionSize(90)
-        self.inventory_items_table.verticalHeader().setDefaultSectionSize(38)
-        self.inventory_items_table.setAlternatingRowColors(True)
-        header = self.inventory_items_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        self.inventory_items_table.horizontalHeaderItem(4).setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.inventory_items_table.horizontalHeaderItem(5).setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.inventory_items_table.horizontalHeaderItem(6).setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.recipe_lines_table.setAlternatingRowColors(True)
+        self.recipe_lines_table.itemChanged.connect(self._on_recipe_line_item_changed)
+        self.recipe_lines_table.horizontalHeader().setStretchLastSection(True)
+        self.recipe_lines_table.setMinimumHeight(245)
+        self.recipe_lines_table.verticalHeader().setDefaultSectionSize(40)
+        self.recipe_lines_table.verticalHeader().setVisible(False)
+        for col in (1, 2, 3, 4):
+            hdr = self.recipe_lines_table.horizontalHeaderItem(col)
+            if hdr:
+                hdr.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        # --- Actions and State ---
+        self.recipe_empty_state_label = QLabel(
+            "🧪  No ingredients added yet.\nSelect an ingredient above and click '+ Add Ingredient to Recipe'."
+        )
+        self.recipe_empty_state_label.setObjectName("RecipeEmptyState")
+        self.recipe_empty_state_label.setAlignment(Qt.AlignCenter)
+        
+        self.remove_recipe_line_btn = QPushButton("✕ Remove Selected")
+        self.remove_recipe_line_btn.setObjectName("RecipeDangerBtn")
+        self.remove_recipe_line_btn.setMinimumHeight(32)
+        self.remove_recipe_line_btn.clicked.connect(self.remove_selected_recipe_line)
+        
+        self.clear_recipe_lines_btn = QPushButton("🗑 Clear All")
+        self.clear_recipe_lines_btn.setObjectName("RecipeDangerBtn")
+        self.clear_recipe_lines_btn.setMinimumHeight(32)
+        self.clear_recipe_lines_btn.clicked.connect(self.clear_recipe_lines)
+        
+        table_actions_row = QHBoxLayout()
+        table_actions_row.setContentsMargins(0, 0, 0, 0)
+        table_actions_row.setSpacing(8)
+        table_actions_row.addWidget(self.remove_recipe_line_btn)
+        table_actions_row.addWidget(self.clear_recipe_lines_btn)
+        table_actions_row.addStretch()
 
-        low_stock_group = QGroupBox("Low Stock Items")
-        low_stock_layout = QVBoxLayout(low_stock_group)
-        self.low_stock_list = QListWidget()
-        self.low_stock_list.itemClicked.connect(self._on_low_stock_item_clicked)
-        low_stock_layout.addWidget(self.low_stock_list)
+        save_recipe_btn = QPushButton("💾  Save Recipe (Admin PIN)")
+        save_recipe_btn.setObjectName("PrimaryRecipeButton")
+        save_recipe_btn.setMinimumHeight(44)
+        save_recipe_btn.clicked.connect(self.save_recipe_from_tab)
 
-        table_area_layout.addWidget(self.inventory_items_table, 4)
-        table_area_layout.addWidget(low_stock_group, 1)
+        # --- Recipe Cost Summary Cards ---
+        summary_row = QHBoxLayout()
+        summary_row.setSpacing(10)
+        self.recipe_line_count_card = QLabel("Lines: 0")
+        self.recipe_line_count_card.setObjectName("RecipeSummaryCard")
+        self.recipe_line_count_card.setAlignment(Qt.AlignCenter)
+        self.recipe_est_cost_card = QLabel("Est. Unit Cost: INR 0.00")
+        self.recipe_est_cost_card.setObjectName("RecipeSummaryCard")
+        self.recipe_est_cost_card.setAlignment(Qt.AlignCenter)
+        self.recipe_est_margin_card = QLabel("Est. Margin/Unit: INR 0.00")
+        self.recipe_est_margin_card.setObjectName("RecipeSummaryCardAccent")
+        self.recipe_est_margin_card.setAlignment(Qt.AlignCenter)
+        summary_row.addWidget(self.recipe_line_count_card)
+        summary_row.addWidget(self.recipe_est_cost_card)
+        summary_row.addWidget(self.recipe_est_margin_card)
+        summary_row.addStretch()
 
-        self.inventory_inline_status_label = QLabel("")
-        self.inventory_inline_status_label.setObjectName("InventoryInlineStatus")
-        self.inventory_inline_status_label.setVisible(False)
+        total_panel = QFrame()
+        total_panel.setObjectName("PurchaseTotalPanel")
+        total_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        total_panel.setMinimumHeight(58)
+        total_layout = QHBoxLayout(total_panel)
+        total_layout.setContentsMargins(10, 6, 10, 6)
+        total_layout.addWidget(save_recipe_btn)
+        total_layout.addStretch()
 
-        self.inventory_empty_state_label = QLabel("No items found. Click '+ Add Item' to get started.")
-        self.inventory_empty_state_label.setObjectName("InventoryEmptyState")
-        self.inventory_empty_state_label.setVisible(False)
+        self.recipe_status_label = QLabel("")
+        self.recipe_status_label.setObjectName("OpsHintLabel")
+        self.recipe_status_label.setVisible(False)
+        
+        recipe_hint = QLabel("Tip: Double-click Qty/Waste cells to edit inline before saving.")
+        recipe_hint.setObjectName("OpsHintLabel")
+        recipe_hint.setMaximumHeight(20)
 
-        action_row = QHBoxLayout()
-        refresh_btn = QPushButton("Refresh Inventory")
-        refresh_btn.setObjectName("PrimaryInventoryButton")
-        refresh_btn.clicked.connect(self.refresh_inventory)
+        # --- Right Panel (Alerts) ---
+        alerts_box = QGroupBox("Low Ingredient Alerts")
+        alerts_box.setObjectName("RecipeAlertsGroup")
+        alerts_layout = QVBoxLayout(alerts_box)
+        self.recipe_low_ingredients_list = QListWidget()
+        alerts_layout.addWidget(self.recipe_low_ingredients_list)
 
-        actions_menu_btn = QToolButton()
-        actions_menu_btn.setText("Inventory Actions")
-        actions_menu_btn.setPopupMode(QToolButton.InstantPopup)
-        actions_menu = QMenu(actions_menu_btn)
-        actions_menu.addAction("Export CSV", self.export_inventory_csv)
-        actions_menu.addAction("Update Price (Admin PIN)", self.update_selected_item_price)
-        actions_menu.addAction("Manual Stock Adjust (Admin PIN)", self.adjust_selected_item_stock)
-        actions_menu.addAction("Manage Recipe (Admin PIN)", self.manage_selected_item_recipe)
-        actions_menu.addAction("Delete Item (Admin PIN)", self.delete_selected_item)
-        actions_menu.addAction("Load Starter Cigarette SKUs", self.load_starter_cigarettes)
-        actions_menu_btn.setMenu(actions_menu)
+        right_footer = QHBoxLayout()
+        right_footer.addWidget(recipe_refresh_btn)
+        right_footer.addStretch()
 
-        action_row.addWidget(refresh_btn)
-        action_row.addWidget(actions_menu_btn)
-        action_row.addStretch()
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        recipe_lines_layout.addWidget(self.recipe_lines_table)
+        recipe_lines_layout.addLayout(table_actions_row)
+        recipe_lines_layout.addWidget(self.recipe_empty_state_label)
+        left_layout.addWidget(recipe_lines_box)
+        left_layout.addWidget(total_panel)
+        left_layout.addWidget(self.recipe_status_label)
+        left_layout.addWidget(recipe_hint)
 
-        root_layout.addWidget(form_group)
-        root_layout.addLayout(filter_row)
-        root_layout.addLayout(summary_row)
-        root_layout.addWidget(inventory_hint)
-        root_layout.addLayout(table_area_layout)
-        root_layout.addWidget(self.inventory_empty_state_label)
-        root_layout.addWidget(self.inventory_inline_status_label)
-        root_layout.addLayout(action_row)
-        root_layout.setStretch(5, 1)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        right_layout.addWidget(alerts_box)
+        right_layout.addLayout(right_footer)
 
-        self.item_name_input.textChanged.connect(self._sync_inventory_add_button_state)
-        self.sell_price_spin.valueChanged.connect(self._sync_inventory_add_button_state)
-        self.stock_spin.valueChanged.connect(self._sync_inventory_add_button_state)
-        self.reorder_spin.valueChanged.connect(self._sync_inventory_add_button_state)
-        self.category_combo.currentIndexChanged.connect(self._sync_inventory_add_button_state)
-        self.item_kind_combo.currentIndexChanged.connect(self._on_item_kind_changed)
-        self._on_item_kind_changed()
-        self._sync_inventory_add_button_state()
-        self._apply_inventory_panel_style(tab)
+        split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+        split.addWidget(left_panel)
+        split.addWidget(right_panel)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        split.setHandleWidth(6)
+        
+        content_layout.addLayout(steps_row)
+        content_layout.addWidget(builder_box)
+        content_layout.addLayout(summary_row)
+        content_layout.addWidget(split)
 
+        main_scroll.setWidget(main_content)
+        root_layout.addWidget(main_scroll)
+
+        self._apply_recipe_panel_style(tab)
         return tab
+
+    def _add_recipe_line_row(
+        self,
+        ingredient_item_id: int | None = None,
+        quantity_used: float | None = None,
+        waste_percent: float | None = None,
+        ingredient_display_name: str | None = None,
+    ) -> None:
+        if not hasattr(self, "recipe_lines_table"):
+            return
+
+        # If it's a manual add from the builder UI
+        if ingredient_item_id is None:
+            ingredient_item_id = self.recipe_builder_ingredient_combo.currentData()
+            if ingredient_item_id is None:
+                QMessageBox.warning(self, "Recipe", "Select an ingredient from the dropdown.")
+                return
+            quantity_used = self.recipe_builder_qty_spin.value()
+            waste_percent = self.recipe_builder_waste_spin.value()
+            ingredient_display_name = self.recipe_builder_ingredient_combo.currentText()
+            
+            # Check if already added
+            for i in range(self.recipe_lines_table.rowCount()):
+                if self.recipe_lines_table.item(i, 0).data(Qt.UserRole) == ingredient_item_id:
+                    self.recipe_status_label.setText("Ingredient already exists in recipe.")
+                    self.recipe_status_label.setVisible(True)
+                    QTimer.singleShot(2000, lambda: self.recipe_status_label.setVisible(False))
+                    return
+
+        if ingredient_item_id is None or quantity_used is None or waste_percent is None or ingredient_display_name is None:
+            return  # Safety
+
+        row = self.recipe_lines_table.rowCount()
+        self.recipe_lines_table.insertRow(row)
+
+        name_item = QTableWidgetItem(ingredient_display_name)
+        name_item.setData(Qt.UserRole, int(ingredient_item_id))
+        name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+
+        qty_item = QTableWidgetItem(f"{float(quantity_used):.4f}")
+        qty_item.setData(Qt.UserRole, float(quantity_used))
+
+        waste_item = QTableWidgetItem(f"{float(waste_percent):.2f}")
+        waste_item.setData(Qt.UserRole, float(waste_percent))
+
+        # Look up ingredient cost from cache for Unit Cost and Line Cost columns
+        ing_cost = 0.0
+        if hasattr(self, "recipe_ingredients_cache"):
+            cached_ing = next(
+                (i for i in self.recipe_ingredients_cache if int(i["id"]) == int(ingredient_item_id)),
+                None,
+            )
+            if cached_ing:
+                ing_cost = float(cached_ing.get("cost_price") or 0)
+
+        waste_multiplier = 1.0 + (float(waste_percent) / 100.0)
+        effective_unit_cost = ing_cost * waste_multiplier
+        line_cost = effective_unit_cost * float(quantity_used)
+
+        unit_cost_item = QTableWidgetItem(f"{effective_unit_cost:.2f}")
+        unit_cost_item.setData(Qt.UserRole, effective_unit_cost)
+        unit_cost_item.setFlags(unit_cost_item.flags() & ~Qt.ItemIsEditable)
+        unit_cost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        line_cost_item = QTableWidgetItem(f"{line_cost:.2f}")
+        line_cost_item.setData(Qt.UserRole, line_cost)
+        line_cost_item.setFlags(line_cost_item.flags() & ~Qt.ItemIsEditable)
+        line_cost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.recipe_lines_table.blockSignals(True)
+        self.recipe_lines_table.setItem(row, 0, name_item)
+        self.recipe_lines_table.setItem(row, 1, qty_item)
+        self.recipe_lines_table.setItem(row, 2, waste_item)
+        self.recipe_lines_table.setItem(row, 3, unit_cost_item)
+        self.recipe_lines_table.setItem(row, 4, line_cost_item)
+        self.recipe_lines_table.blockSignals(False)
+        
+        self.recipe_empty_state_label.setVisible(False)
+        self.recipe_builder_qty_spin.setValue(1.0)
+        self.recipe_builder_waste_spin.setValue(0.0)
+        self._update_recipe_cost_summary()
+
+    def _on_recipe_line_item_changed(self, item: QTableWidgetItem) -> None:
+        col = item.column()
+        if col not in (1, 2):
+            return
+
+        text = item.text().strip()
+        try:
+            val = float(text)
+            if val < 0:
+                raise ValueError("Cannot be negative")
+            item.setData(Qt.UserRole, val)
+        except ValueError:
+            # Revert
+            old_val = item.data(Qt.UserRole)
+            self.recipe_lines_table.blockSignals(True)
+            if old_val is not None:
+                item.setText(f"{old_val:.4f}" if col == 1 else f"{old_val:.2f}")
+            self.recipe_lines_table.blockSignals(False)
+            return
+
+        self.recipe_lines_table.blockSignals(True)
+        item.setText(f"{val:.4f}" if col == 1 else f"{val:.2f}")
+
+        # Recalculate cost columns for this row
+        row = item.row()
+        qty_item = self.recipe_lines_table.item(row, 1)
+        waste_item = self.recipe_lines_table.item(row, 2)
+        unit_cost_item = self.recipe_lines_table.item(row, 3)
+        line_cost_item = self.recipe_lines_table.item(row, 4)
+        if qty_item and waste_item and unit_cost_item and line_cost_item:
+            base_unit_cost = float(unit_cost_item.data(Qt.UserRole) or 0)
+            # If waste changed, recompute effective unit cost from base
+            if col == 2:
+                # Need to derive base cost (without waste) from current effective cost
+                old_waste = float(waste_item.data(Qt.UserRole) or 0)
+                # We stored effective cost in UserRole; recompute from base
+                # base = effective / (1 + old_waste/100) — but old_waste already updated
+                # Simpler: use the stored base cost from the ingredient cache
+                ing_id = self.recipe_lines_table.item(row, 0)
+                if ing_id:
+                    ing_cost = 0.0
+                    if hasattr(self, "recipe_ingredients_cache"):
+                        cached_ing = next(
+                            (i for i in self.recipe_ingredients_cache if int(i["id"]) == int(ing_id.data(Qt.UserRole))),
+                            None,
+                        )
+                        if cached_ing:
+                            ing_cost = float(cached_ing.get("cost_price") or 0)
+                    waste_multiplier = 1.0 + (val / 100.0)
+                    effective_unit_cost = ing_cost * waste_multiplier
+                else:
+                    effective_unit_cost = base_unit_cost
+            else:
+                effective_unit_cost = base_unit_cost
+
+            qty = float(qty_item.data(Qt.UserRole) or 0)
+            line_cost = effective_unit_cost * qty
+
+            unit_cost_item.setText(f"{effective_unit_cost:.2f}")
+            unit_cost_item.setData(Qt.UserRole, effective_unit_cost)
+            line_cost_item.setText(f"{line_cost:.2f}")
+            line_cost_item.setData(Qt.UserRole, line_cost)
+
+        self.recipe_lines_table.blockSignals(False)
+        self._update_recipe_cost_summary()
+
+    def remove_selected_recipe_line(self) -> None:
+        if not hasattr(self, "recipe_lines_table"):
+            return
+        row = self.recipe_lines_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Recipe", "Select a line to remove.")
+            return
+        self.recipe_lines_table.removeRow(row)
+        if self.recipe_lines_table.rowCount() == 0:
+            self.recipe_empty_state_label.setVisible(True)
+        self._update_recipe_cost_summary()
+
+    def clear_recipe_lines(self) -> None:
+        if not hasattr(self, "recipe_lines_table"):
+            return
+        self.recipe_lines_table.setRowCount(0)
+        self.recipe_empty_state_label.setVisible(True)
+        self._update_recipe_cost_summary()
+
+    def _update_recipe_cost_summary(self) -> None:
+        if not hasattr(self, "recipe_line_count_card"):
+            return
+
+        line_count = self.recipe_lines_table.rowCount()
+        total_line_cost = 0.0
+        for row in range(line_count):
+            lc_item = self.recipe_lines_table.item(row, 4)
+            if lc_item:
+                total_line_cost += float(lc_item.data(Qt.UserRole) or 0)
+
+        yield_qty = float(self.recipe_yield_spin.value()) if hasattr(self, "recipe_yield_spin") else 1.0
+        if yield_qty <= 0:
+            yield_qty = 1.0
+        unit_cost = total_line_cost / yield_qty
+
+        # Look up selling price of selected product for margin calculation
+        sell_price = 0.0
+        product_id = self.recipe_product_combo.currentData() if hasattr(self, "recipe_product_combo") else None
+        if product_id is not None and hasattr(self, "inventory_items_cache"):
+            prod = next((i for i in self.inventory_items_cache if int(i["id"]) == int(product_id)), None)
+            if prod:
+                sell_price = float(prod.get("selling_price") or 0)
+
+        margin_per_unit = sell_price - unit_cost
+
+        self.recipe_line_count_card.setText(f"🧾 Lines: {line_count}")
+        self.recipe_est_cost_card.setText(f"💰 Est. Unit Cost: INR {unit_cost:.2f}")
+        margin_color = self.THEME["success"] if margin_per_unit >= 0 else self.THEME["danger"]
+        self.recipe_est_margin_card.setText(f"📈 Margin/Unit: INR {margin_per_unit:.2f}")
+        self.recipe_est_margin_card.setStyleSheet(
+            f"color: {margin_color}; font-weight: 800; border: 1.5px solid {margin_color}; "
+            f"border-radius: 10px; background-color: {'#f0fdf4' if margin_per_unit >= 0 else '#fef2f2'}; "
+            f"padding: 8px 14px;"
+        )
+
+    def load_selected_recipe_in_tab(self) -> None:
+        if not hasattr(self, "recipe_product_combo") or not hasattr(self, "recipe_lines_table"):
+            return
+
+        product_id = self.recipe_product_combo.currentData()
+        if product_id is None:
+            self.recipe_lines_table.setRowCount(0)
+            self.recipe_empty_state_label.setVisible(True)
+            return
+
+        existing = self.inventory_service.get_recipe(int(product_id))
+        self.recipe_lines_table.setRowCount(0)
+        
+        if existing is None:
+            self.recipe_yield_spin.setValue(1.0)
+            self.recipe_empty_state_label.setVisible(True)
+            return
+
+        self.recipe_yield_spin.setValue(float(existing.get("yield_qty", 1.0) or 1.0))
+        lines = existing.get("lines", [])
+        if not lines:
+            self.recipe_empty_state_label.setVisible(True)
+        else:
+            self.recipe_empty_state_label.setVisible(False)
+            for line in lines:
+                name_str = f"{line.get('ingredient_name', 'Unknown')} ({line.get('unit_name', 'unit')}) | Stock {float(line.get('stock_quantity') or 0):.2f}"
+                self._add_recipe_line_row(
+                    ingredient_item_id=int(line["ingredient_item_id"]),
+                    quantity_used=float(line["quantity_used"]),
+                    waste_percent=float(line.get("waste_percent", 0.0)),
+                    ingredient_display_name=name_str
+                )
+
+    def save_recipe_from_tab(self) -> None:
+        if not hasattr(self, "recipe_product_combo") or not hasattr(self, "recipe_lines_table"):
+            return
+
+        product_id = self.recipe_product_combo.currentData()
+        if product_id is None:
+            QMessageBox.warning(self, "Recipe", "Select a sellable product first.")
+            return
+            
+        pin = self._require_admin_access("Save Recipe")
+        if pin is None:
+            return
+
+        lines: list[dict] = []
+        for row in range(self.recipe_lines_table.rowCount()):
+            ing_item = self.recipe_lines_table.item(row, 0)
+            qty_item = self.recipe_lines_table.item(row, 1)
+            waste_item = self.recipe_lines_table.item(row, 2)
+            if not ing_item or not qty_item or not waste_item:
+                continue
+
+            lines.append(
+                {
+                    "ingredient_item_id": int(ing_item.data(Qt.UserRole)),
+                    "quantity_used": float(qty_item.data(Qt.UserRole)),
+                    "waste_percent": float(waste_item.data(Qt.UserRole)),
+                }
+            )
+
+        if not lines:
+            QMessageBox.warning(self, "Recipe", "Recipe must include at least one ingredient line.")
+            return
+
+        try:
+            self.inventory_service.save_recipe(
+                sellable_item_id=int(product_id),
+                lines=lines,
+                yield_qty=float(self.recipe_yield_spin.value()),
+                admin_pin=pin,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Recipe", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Recipe Error", str(exc))
+            return
+
+        self.recipe_status_label.setText("Recipe saved successfully.")
+        self.recipe_status_label.setVisible(True)
+        QTimer.singleShot(2200, lambda: self.recipe_status_label.setVisible(False))
+        self.refresh_recipe_tab()
+        self.refresh_billing_items()
+        self.refresh_reports()
+        self._log_audit("recipe_save_tab", "item", str(product_id), f"lines={len(lines)}")
+
+    def refresh_recipe_tab(self) -> None:
+        if not hasattr(self, "recipe_product_combo"):
+            return
+
+        all_items = self.inventory_service.list_items()
+        self.recipe_ingredients_cache = self.inventory_service.list_ingredients()
+        sellables = [i for i in all_items if (i.get("item_kind") or "sellable") == "sellable"]
+
+        selected_product = self.recipe_product_combo.currentData()
+        self.recipe_product_combo.blockSignals(True)
+        self.recipe_product_combo.clear()
+        for item in sellables:
+            self.recipe_product_combo.addItem(item["name"], int(item["id"]))
+        if sellables:
+            index = self.recipe_product_combo.findData(selected_product)
+            self.recipe_product_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.recipe_product_combo.blockSignals(False)
+        
+        if hasattr(self, "recipe_builder_ingredient_combo"):
+            selected_ing = self.recipe_builder_ingredient_combo.currentData()
+            self.recipe_builder_ingredient_combo.blockSignals(True)
+            self.recipe_builder_ingredient_combo.clear()
+            for ing in self.recipe_ingredients_cache:
+                self.recipe_builder_ingredient_combo.addItem(
+                    f"{ing['name']} ({ing.get('unit_name') or 'unit'}) | Stock {float(ing.get('stock_quantity') or 0):.2f}",
+                    int(ing["id"]),
+                )
+            if self.recipe_ingredients_cache:
+                index = self.recipe_builder_ingredient_combo.findData(selected_ing)
+                self.recipe_builder_ingredient_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.recipe_builder_ingredient_combo.blockSignals(False)
+
+        if sellables:
+            self.load_selected_recipe_in_tab()
+        else:
+            self.recipe_lines_table.setRowCount(0)
+            self.recipe_empty_state_label.setVisible(True)
+
+        low_ingredients = self.inventory_service.low_ingredient_items()
+        self.recipe_low_ingredients_list.clear()
+        if not low_ingredients:
+            self.recipe_low_ingredients_list.addItem("All ingredient stock is healthy.")
+        else:
+            for row in low_ingredients:
+                self.recipe_low_ingredients_list.addItem(
+                    f"{row['name']} | Stock {float(row['stock_quantity']):.2f} / Reorder {float(row['reorder_level']):.2f} {row.get('unit_name') or ''}"
+                )
+
+    def _build_inventory_tab(self) -> QWidget:
+        return build_inventory_tab(self)
 
     def _build_purchases_tab(self) -> QWidget:
         tab = QWidget()
-        tab.setObjectName("PurchasesPanel")
+        tab.setObjectName("PurchasesTabRoot")
         root_layout = QVBoxLayout(tab)
-        root_layout.setContentsMargins(10, 10, 10, 10)
-        root_layout.setSpacing(4)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QFrame.NoFrame)
+        
+        main_content = QWidget()
+        main_content.setObjectName("PurchasesPanel")
+        content_layout = QVBoxLayout(main_content)
+        content_layout.setContentsMargins(15, 15, 15, 15)
+        content_layout.setSpacing(15)
+
+        # --- Step Badges ---
+        p_steps_row = QHBoxLayout()
+        p_steps_row.setSpacing(6)
+        for idx, (label, icon) in enumerate([
+            ("1  Add Items", "📦"),
+            ("2  Build List", "📋"),
+            ("3  Save Purchase", "💾"),
+        ]):
+            badge = QLabel(f"{icon}  {label}")
+            badge.setObjectName("PurchaseStepBadge")
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setMinimumHeight(32)
+            p_steps_row.addWidget(badge)
+            if idx < 2:
+                arrow = QLabel("→")
+                arrow.setObjectName("PurchaseStepArrow")
+                arrow.setAlignment(Qt.AlignCenter)
+                p_steps_row.addWidget(arrow)
+        p_steps_row.addStretch()
 
         entry_box = QGroupBox("Purchase Builder")
         entry_layout = QGridLayout(entry_box)
@@ -1537,60 +2373,68 @@ class MainWindow(QMainWindow):
 
         self.purchase_supplier_input = QLineEdit()
         self.purchase_supplier_input.setPlaceholderText("Supplier name")
+        self.purchase_supplier_input.setMinimumHeight(34)
         self.purchase_notes_input = QLineEdit()
         self.purchase_notes_input.setPlaceholderText("Optional notes")
+        self.purchase_notes_input.setMinimumHeight(34)
         self.purchase_item_combo = QComboBox()
         self.purchase_item_combo.currentIndexChanged.connect(self._on_purchase_item_changed)
+        self.purchase_item_combo.setMinimumHeight(34)
         self.purchase_qty_spin = QDoubleSpinBox()
         self.purchase_qty_spin.setDecimals(2)
         self.purchase_qty_spin.setMinimum(0.01)
         self.purchase_qty_spin.setMaximum(100000)
         self.purchase_qty_spin.setValue(1)
         self.purchase_qty_spin.valueChanged.connect(self._update_purchase_stock_preview)
+        self.purchase_qty_spin.setMinimumHeight(34)
 
         self.purchase_cost_spin = QDoubleSpinBox()
         self.purchase_cost_spin.setDecimals(2)
         self.purchase_cost_spin.setMinimum(0)
         self.purchase_cost_spin.setMaximum(100000)
         self.purchase_cost_spin.setPrefix("INR ")
+        self.purchase_cost_spin.setMinimumHeight(34)
         self.purchase_item_combo.setMaximumWidth(460)
         self.purchase_qty_spin.setMaximumWidth(130)
         self.purchase_cost_spin.setMaximumWidth(180)
 
         self.add_line_btn = QPushButton("+ Add Item to Purchase")
         self.add_line_btn.setObjectName("PrimaryPurchaseButton")
-        self.add_line_btn.setMinimumHeight(46)
-        self.add_line_btn.setMinimumWidth(280)
+        self.add_line_btn.setMinimumHeight(42)
+        self.add_line_btn.setMinimumWidth(260)
         self.add_line_btn.clicked.connect(self.add_purchase_line)
 
-        save_purchase_btn = QPushButton("Save Purchase")
+        save_purchase_btn = QPushButton("💾  Save Purchase")
         save_purchase_btn.setObjectName("PrimaryPurchaseButton")
-        save_purchase_btn.setMinimumHeight(34)
-        save_purchase_btn.setMaximumHeight(34)
+        save_purchase_btn.setMinimumHeight(38)
         self.save_purchase_btn = save_purchase_btn
         save_purchase_btn.clicked.connect(self.save_purchase)
 
-        cancel_edit_btn = QPushButton("Cancel Edit")
-        cancel_edit_btn.setObjectName("SecondaryPurchaseButton")
+        cancel_edit_btn = QPushButton("✕ Cancel Edit")
+        cancel_edit_btn.setObjectName("PurchaseDangerBtn")
         self.cancel_purchase_edit_btn = cancel_edit_btn
         self.cancel_purchase_edit_btn.setVisible(False)
         self.cancel_purchase_edit_btn.setEnabled(False)
         cancel_edit_btn.clicked.connect(self.cancel_purchase_edit)
 
-        self.clear_purchase_lines_btn = QPushButton("Clear All")
-        self.clear_purchase_lines_btn.setObjectName("SecondaryPurchaseButton")
+        self.clear_purchase_lines_btn = QPushButton("🗑 Clear All")
+        self.clear_purchase_lines_btn.setObjectName("PurchaseDangerBtn")
+        self.clear_purchase_lines_btn.setMinimumHeight(32)
         self.clear_purchase_lines_btn.clicked.connect(self.clear_purchase_lines)
 
-        self.remove_purchase_line_btn = QPushButton("Remove Selected")
-        self.remove_purchase_line_btn.setObjectName("SecondaryPurchaseButton")
+        self.remove_purchase_line_btn = QPushButton("✕ Remove Selected")
+        self.remove_purchase_line_btn.setObjectName("PurchaseDangerBtn")
+        self.remove_purchase_line_btn.setMinimumHeight(32)
         self.remove_purchase_line_btn.clicked.connect(self.remove_selected_purchase_line)
 
-        modify_saved_btn = QPushButton("Modify Selected Purchase (Admin PIN)")
-        modify_saved_btn.setObjectName("SecondaryPurchaseButton")
+        modify_saved_btn = QPushButton("✎ Modify (Admin PIN)")
+        modify_saved_btn.setObjectName("PurchaseActionBtn")
+        modify_saved_btn.setMinimumHeight(32)
         modify_saved_btn.clicked.connect(self.load_selected_purchase_for_edit)
 
-        duplicate_saved_btn = QPushButton("Duplicate Selected Purchase")
-        duplicate_saved_btn.setObjectName("SecondaryPurchaseButton")
+        duplicate_saved_btn = QPushButton("⧉ Duplicate")
+        duplicate_saved_btn.setObjectName("PurchaseActionBtn")
+        duplicate_saved_btn.setMinimumHeight(32)
         duplicate_saved_btn.clicked.connect(self.duplicate_selected_purchase)
 
         entry_layout.addWidget(QLabel("<b>Supplier</b>"), 0, 0)
@@ -1608,7 +2452,13 @@ class MainWindow(QMainWindow):
 
         self.purchase_stock_preview_label = QLabel("")
         self.purchase_stock_preview_label.setObjectName("PurchaseStockPreview")
-        entry_layout.addWidget(self.purchase_stock_preview_label, 2, 2, 1, 3)
+        entry_layout.addWidget(self.purchase_stock_preview_label, 2, 2, 1, 2)
+
+        # Stock preview card (visual indicator)
+        self.purchase_stock_card = QLabel("📦 Stock: --")
+        self.purchase_stock_card.setObjectName("PurchaseStockCard")
+        self.purchase_stock_card.setAlignment(Qt.AlignCenter)
+        entry_layout.addWidget(self.purchase_stock_card, 2, 4, 1, 2)
 
         add_line_row = QHBoxLayout()
         add_line_row.addStretch()
@@ -1616,10 +2466,11 @@ class MainWindow(QMainWindow):
         entry_layout.addLayout(add_line_row, 3, 0, 1, 6)
 
         purchase_builder_hint = QLabel(
-            "Step 1: Select item and add line. Step 2: Build list. Step 3: Save purchase."
+            "Tip: Select item → set qty & cost → add line → repeat → save purchase."
         )
         purchase_builder_hint.setObjectName("PurchaseInlineFeedback")
         purchase_builder_hint.setMaximumHeight(20)
+        entry_box.setMaximumHeight(220)
 
         self.purchase_lines_table = QTableWidget(0, 4)
         self.purchase_lines_table.setHorizontalHeaderLabels(
@@ -1640,9 +2491,10 @@ class MainWindow(QMainWindow):
         self.purchase_lines_table.horizontalHeaderItem(3).setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.purchase_empty_state_label = QLabel(
-            "Start building your purchase. Select item above and click '+ Add Item to Purchase'."
+            "📦  No purchase lines yet.\nSelect an item above and click '+ Add Item to Purchase'."
         )
         self.purchase_empty_state_label.setObjectName("PurchaseEmptyState")
+        self.purchase_empty_state_label.setAlignment(Qt.AlignCenter)
         self.purchase_empty_state_label.setVisible(True)
 
         table_actions_row = QHBoxLayout()
@@ -1652,26 +2504,50 @@ class MainWindow(QMainWindow):
         table_actions_row.addWidget(self.clear_purchase_lines_btn)
         table_actions_row.addStretch()
 
+        # Purchase line count badge
+        self.purchase_line_count_card = QLabel("🧾 Lines: 0")
+        self.purchase_line_count_card.setObjectName("PurchaseSummaryCard")
+        self.purchase_line_count_card.setAlignment(Qt.AlignCenter)
+
         total_panel = QFrame()
         total_panel.setObjectName("PurchaseTotalPanel")
         total_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        total_panel.setMinimumHeight(74)
-        total_panel.setMaximumHeight(86)
+        total_panel.setMinimumHeight(118)
         total_layout = QVBoxLayout(total_panel)
-        total_layout.setContentsMargins(10, 4, 10, 4)
-        total_layout.setSpacing(2)
+        total_layout.setContentsMargins(12, 10, 12, 10)
+        total_layout.setSpacing(6)
 
         self.purchase_total_label = QLabel("TOTAL: INR 0.00")
         self.purchase_total_label.setObjectName("PurchaseTotalLabel")
-        self.purchase_total_label.setAlignment(Qt.AlignCenter)
+        self.purchase_total_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.purchase_total_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.purchase_total_label.setMinimumHeight(34)
+
+        self.purchase_line_count_card.setMinimumWidth(120)
+        self.purchase_line_count_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.purchase_line_count_card.setMinimumHeight(34)
+
+        total_top_row = QHBoxLayout()
+        total_top_row.setContentsMargins(0, 0, 0, 0)
+        total_top_row.setSpacing(8)
+        total_top_row.addWidget(self.purchase_total_label, 1)
+        total_top_row.addWidget(self.purchase_line_count_card, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(8)
         actions_row.addStretch()
         actions_row.addWidget(self.cancel_purchase_edit_btn)
         actions_row.addWidget(save_purchase_btn)
 
-        total_layout.addWidget(self.purchase_total_label)
+        footer_hint_row = QHBoxLayout()
+        footer_hint_row.setContentsMargins(0, 0, 0, 0)
+        footer_hint_row.setSpacing(0)
+        footer_hint_row.addStretch()
+
+        total_layout.addLayout(total_top_row)
         total_layout.addLayout(actions_row)
+        total_layout.addLayout(footer_hint_row)
 
         self.purchase_mode_label = QLabel("Mode: New Purchase")
         self.purchase_mode_label.setObjectName("PurchaseInlineFeedback")
@@ -1792,12 +2668,15 @@ class MainWindow(QMainWindow):
         workspace_splitter.setStretchFactor(0, 3)
         workspace_splitter.setStretchFactor(1, 2)
 
-        root_layout.addWidget(entry_box)
-        root_layout.addWidget(purchase_builder_hint)
-        root_layout.addWidget(self.purchase_mode_label)
-        root_layout.addWidget(self.purchase_feedback_label)
-        root_layout.addWidget(workspace_splitter)
-        root_layout.setStretch(4, 1)
+        content_layout.addLayout(p_steps_row)
+        content_layout.addWidget(entry_box)
+        content_layout.addWidget(purchase_builder_hint)
+        content_layout.addWidget(self.purchase_mode_label)
+        content_layout.addWidget(self.purchase_feedback_label)
+        content_layout.addWidget(workspace_splitter)
+
+        main_scroll.setWidget(main_content)
+        root_layout.addWidget(main_scroll)
 
         self.purchase_qty_spin.lineEdit().returnPressed.connect(self.add_purchase_line)
         self.purchase_cost_spin.lineEdit().returnPressed.connect(self.add_purchase_line)
@@ -1808,8 +2687,19 @@ class MainWindow(QMainWindow):
 
     def _build_expenses_tab(self) -> QWidget:
         tab = QWidget()
-        tab.setObjectName("ExpensesPanel")
+        tab.setObjectName("ExpensesTabRoot")
         root_layout = QVBoxLayout(tab)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QFrame.NoFrame)
+        
+        main_content = QWidget()
+        main_content.setObjectName("ExpensesPanel")
+        content_layout = QVBoxLayout(main_content)
+        content_layout.setContentsMargins(15, 15, 15, 15)
+        content_layout.setSpacing(15)
 
         entry_box = QGroupBox("Record Expense")
         form_layout = QGridLayout(entry_box)
@@ -1855,8 +2745,10 @@ class MainWindow(QMainWindow):
         history_layout.addWidget(self.expense_history_table)
 
         expense_hint = QLabel("Tip: Double-click Type, Amount, or Notes in Recent Expenses to edit inline.")
+        expense_hint.setObjectName("OpsHintLabel")
 
         filter_box = QGroupBox("Expense Date Filter")
+        filter_box.setObjectName("OpsSectionCard")
         filter_layout = QHBoxLayout(filter_box)
         self.expense_from_date = QDateEdit()
         self.expense_from_date.setCalendarPopup(True)
@@ -1924,111 +2816,68 @@ class MainWindow(QMainWindow):
         export_expenses_btn.setObjectName("SecondaryExpenseButton")
         export_expenses_btn.clicked.connect(self.export_expenses_csv)
 
-        root_layout.addWidget(entry_box)
-        root_layout.addWidget(expense_hint)
-        root_layout.addWidget(filter_box)
-        root_layout.addWidget(history_box)
-        root_layout.addWidget(export_expenses_btn)
-        root_layout.addWidget(refresh_btn)
+        expenses_actions_row = QHBoxLayout()
+        expenses_actions_row.setContentsMargins(0, 0, 0, 0)
+        expenses_actions_row.setSpacing(8)
+        expenses_actions_row.addWidget(export_expenses_btn)
+        expenses_actions_row.addWidget(refresh_btn)
+        expenses_actions_row.addStretch()
+
+        content_layout.addWidget(entry_box)
+        content_layout.addWidget(expense_hint)
+        content_layout.addWidget(filter_box)
+        content_layout.addWidget(history_box)
+        content_layout.addLayout(expenses_actions_row)
+
+        main_scroll.setWidget(main_content)
+        root_layout.addWidget(main_scroll)
+
         self._apply_expenses_panel_style(tab)
         return tab
 
     def _apply_expenses_panel_style(self, tab: QWidget) -> None:
-        tab.setStyleSheet(
-            "#ExpensesPanel QGroupBox {"
-            "border: 1px solid #3f485b;"
-            "border-radius: 8px;"
-            "margin-top: 8px;"
-            "padding-top: 8px;"
-            "}"
-            "#ExpensesPanel QGroupBox::title {"
-            "subcontrol-origin: margin;"
-            "left: 8px;"
-            "padding: 0 4px;"
-            "font-weight: 600;"
-            "color: #dbe5f5;"
-            "}"
-            "#ExpensesPanel QTableWidget {"
-            "gridline-color: #2f4261;"
-            "background-color: #152036;"
-            "alternate-background-color: #1b2942;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "border: 1px solid #385176;"
-            "border-radius: 6px;"
-            "}"
-            "#ExpensesPanel QTableWidget::item:hover {"
-            "background-color: #203a5f;"
-            "}"
-            "#ExpensesPanel QHeaderView::section {"
-            "background-color: #233552;"
-            "color: #eaf1ff;"
-            "padding: 7px 8px;"
-            "border: 0px;"
-            "border-right: 1px solid #3f5980;"
-            "font-weight: 600;"
-            "}"
-            "#ExpensesPanel QLineEdit,"
-            "#ExpensesPanel QDoubleSpinBox,"
-            "#ExpensesPanel QComboBox,"
-            "#ExpensesPanel QDateEdit {"
-            "background-color: #131d2e;"
-            "color: #f2f6ff;"
-            "border: 1px solid #425a80;"
-            "border-radius: 6px;"
-            "padding: 6px 8px;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "}"
-            "#ExpensesPanel QLineEdit::placeholder {"
-            "color: #90a4c8;"
-            "}"
-            "#ExpensesPanel QComboBox::drop-down,"
-            "#ExpensesPanel QDateEdit::drop-down {"
-            "border: 0px;"
-            "width: 22px;"
-            "}"
-            "#ExpensesPanel QComboBox QAbstractItemView,"
-            "#ExpensesPanel QDateEdit QAbstractItemView {"
-            "background-color: #1a263c;"
-            "color: #edf3ff;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "border: 1px solid #435e88;"
-            "}"
-            "#ExpensesPanel QLineEdit:focus,"
-            "#ExpensesPanel QDoubleSpinBox:focus,"
-            "#ExpensesPanel QComboBox:focus,"
-            "#ExpensesPanel QDateEdit:focus {"
-            "border: 1px solid #55c2ff;"
-            "background-color: #1a2940;"
-            "}"
-            "#ExpensesPanel QPushButton {"
-            "border-radius: 8px;"
-            "padding: 7px 12px;"
-            "border: 1px solid #4a5872;"
-            "background-color: #2d3a50;"
-            "color: #edf3fb;"
-            "}"
-            "#ExpensesPanel QPushButton#PrimaryExpenseButton {"
-            "background-color: #219552;"
-            "border: 1px solid #25a55a;"
-            "font-weight: 700;"
-            "}"
-            "#ExpensesPanel QPushButton#PrimaryExpenseButton:hover {"
-            "background-color: #2bb061;"
-            "}"
-            "#ExpensesPanel QPushButton#SecondaryExpenseButton {"
-            "background-color: #2d3a50;"
-            "}"
-            "#ExpensesPanel QPushButton#ExpenseFilterPreset {"
-            "background-color: #334767;"
-            "border-color: #556e95;"
-            "}"
-            "#ExpensesPanel QPushButton#ExpenseFilterPreset:hover {"
-            "background-color: #3e5780;"
-            "}"
-        )
+        T = self.THEME
+        tab.setStyleSheet(f"""
+            #ExpensesPanel {{
+                background-color: {T['bg_deep']};
+            }}
+            #ExpensesPanel QGroupBox {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 12px;
+                background-color: {T['bg_surface']};
+                margin-top: 15px;
+                padding-top: 15px;
+            }}
+            QPushButton#ExpenseFilterPreset {{
+                background-color: {T['bg_surface']};
+                color: {T['text_medium']};
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 15px;
+                padding: 6px 15px;
+                font-weight: 700;
+            }}
+            QPushButton#ExpenseFilterPreset:checked {{
+                background-color: {T['text_primary']};
+                color: white;
+                border-color: {T['text_primary']};
+            }}
+            QPushButton#PrimaryExpenseButton {{
+                background-color: {T['accent_primary']};
+                color: white;
+                font-weight: 800;
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 14px;
+            }}
+            QPushButton#SecondaryExpenseButton {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                border: 1.5px solid {T['border_bold']};
+                font-weight: 700;
+                border-radius: 8px;
+                padding: 10px;
+            }}
+        """)
 
     def _build_reports_tab(self) -> QWidget:
         tab = QWidget()
@@ -2036,10 +2885,10 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(tab)
 
         title = QLabel("Operations Dashboard")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #e0e0e0;")
+        title.setStyleSheet(f"font-size: 20px; font-weight: 900; color: {self.THEME['text_primary']};")
 
         subtitle = QLabel("Live performance snapshot for sales, stock, and profitability")
-        subtitle.setStyleSheet("color: #9ea7b8;")
+        subtitle.setStyleSheet(f"color: {self.THEME['text_medium']};")
 
         cards_grid = QGridLayout()
         cards_grid.setHorizontalSpacing(10)
@@ -2050,10 +2899,10 @@ class MainWindow(QMainWindow):
         gross_card, self.gross_profit_value = self._make_report_metric_card("Gross Profit", "#64b5f6")
         purchases_card, self.purchases_value = self._make_report_metric_card("Purchases", "#9575cd")
         expenses_card, self.expenses_value = self._make_report_metric_card("Expenses", "#ef5350")
-        fixed_daily_card, self.fixed_daily_value = self._make_report_metric_card("Fixed Cost / Day", "#ff7043")
-        net_card, self.net_value = self._make_report_metric_card("Realistic Daily Profit", "#26c6da")
+        fixed_daily_card, self.fixed_daily_value = self._make_report_metric_card("Period Fixed Cost", "#ff7043")
+        net_card, self.net_value = self._make_report_metric_card("Net Profit", "#26c6da")
 
-        metric_cards = [
+        self.metric_cards = [
             sales_card,
             cogs_card,
             gross_card,
@@ -2062,14 +2911,11 @@ class MainWindow(QMainWindow):
             fixed_daily_card,
             net_card,
         ]
-        for index, card in enumerate(metric_cards):
-            row = index // 4
-            col = index % 4
-            cards_grid.addWidget(card, row, col)
-        for col in range(4):
-            cards_grid.setColumnStretch(col, 1)
+        self.reports_cards_grid = cards_grid
+        # Arrangement is handled by _apply_adaptive_layout via resizeEvent
 
         fixed_cost_box = QGroupBox("Monthly Fixed Costs (Auto-divided daily)")
+        fixed_cost_box.setObjectName("DataOpsSectionBox")
         fixed_cost_layout = QGridLayout(fixed_cost_box)
 
         self.rent_spin = QDoubleSpinBox()
@@ -2109,6 +2955,7 @@ class MainWindow(QMainWindow):
         fixed_cost_layout.addWidget(save_fixed_btn, 2, 3)
 
         daily_overhead_box = QGroupBox("Daily Variable Overhead (for Recipe Costing)")
+        daily_overhead_box.setObjectName("DataOpsSectionBox")
         daily_overhead_layout = QGridLayout(daily_overhead_box)
         self.overhead_date_edit = QDateEdit()
         self.overhead_date_edit.setCalendarPopup(True)
@@ -2200,6 +3047,43 @@ class MainWindow(QMainWindow):
         self.top_items_table.setColumnWidth(0, 220)
         top_items_layout.addWidget(self.top_items_table)
 
+        payment_box = QGroupBox("Payment Breakdown")
+        payment_layout = QVBoxLayout(payment_box)
+        self.payment_breakdown_table = QTableWidget(0, 3)
+        self.payment_breakdown_table.setHorizontalHeaderLabels(["Method", "Bills", "Amount"])
+        self._style_report_table(self.payment_breakdown_table)
+        self._apply_report_column_modes(
+            self.payment_breakdown_table,
+            [
+                QHeaderView.Stretch,
+                QHeaderView.ResizeToContents,
+                QHeaderView.ResizeToContents,
+            ],
+        )
+        self.payment_breakdown_table.setMinimumHeight(160)
+        payment_layout.addWidget(self.payment_breakdown_table)
+
+        recent_sales_box = QGroupBox("Recent Sales")
+        recent_sales_layout = QVBoxLayout(recent_sales_box)
+        self.recent_sales_table = QTableWidget(0, 6)
+        self.recent_sales_table.setHorizontalHeaderLabels(
+            ["Invoice", "Time", "Payment", "Customer", "Phone", "Amount"]
+        )
+        self._style_report_table(self.recent_sales_table)
+        self._apply_report_column_modes(
+            self.recent_sales_table,
+            [
+                QHeaderView.ResizeToContents,
+                QHeaderView.ResizeToContents,
+                QHeaderView.ResizeToContents,
+                QHeaderView.Stretch,
+                QHeaderView.ResizeToContents,
+                QHeaderView.ResizeToContents,
+            ],
+        )
+        self.recent_sales_table.setMinimumHeight(170)
+        recent_sales_layout.addWidget(self.recent_sales_table)
+
         low_stock_box = QGroupBox("Low Stock")
         low_stock_layout = QVBoxLayout(low_stock_box)
         self.low_stock_table = QTableWidget(0, 3)
@@ -2256,6 +3140,10 @@ class MainWindow(QMainWindow):
         restore_btn = QPushButton("Restore DB Backup")
         restore_btn.setObjectName("DataOpsDangerButton")
         restore_btn.clicked.connect(self.restore_backup_dialog)
+
+        license_btn = QPushButton("Manage License")
+        license_btn.setObjectName("DataOpsExportButton")
+        license_btn.clicked.connect(self.manage_license)
 
         export_reports_btn = QPushButton("Export CSV")
         export_reports_btn.setObjectName("DataOpsExportButton")
@@ -2322,6 +3210,9 @@ class MainWindow(QMainWindow):
         self.top_items_limit_spin = QSpinBox()
         self.top_items_limit_spin.setRange(5, 100)
         self.top_items_limit_spin.setValue(20)
+        self.recent_sales_limit_spin = QSpinBox()
+        self.recent_sales_limit_spin.setRange(10, 500)
+        self.recent_sales_limit_spin.setValue(80)
         self.ledger_limit_spin = QSpinBox()
         self.ledger_limit_spin.setRange(50, 2000)
         self.ledger_limit_spin.setValue(500)
@@ -2334,6 +3225,11 @@ class MainWindow(QMainWindow):
         self.open_after_export_checkbox = QCheckBox("Open after export")
         self.open_after_export_checkbox.setChecked(True)
         reports_tabs = QTabWidget()
+        reports_tabs.setObjectName("ReportsSubTabs")
+        reports_tabs.setDocumentMode(True)
+        reports_tabs.setMovable(False)
+        reports_tabs.setUsesScrollButtons(False)
+        self.reports_tabs = reports_tabs
 
         overview_tab = QWidget()
         overview_tab.setObjectName("ReportsOverviewTab")
@@ -2352,25 +3248,34 @@ class MainWindow(QMainWindow):
         overview_filters_layout.addWidget(r_custom_btn, 0, 7)
         overview_filters_layout.addWidget(QLabel("<b>Top Items</b>"), 1, 0)
         overview_filters_layout.addWidget(self.top_items_limit_spin, 1, 1)
+        overview_filters_layout.addWidget(QLabel("<b>Recent Sales</b>"), 1, 3)
+        overview_filters_layout.addWidget(self.recent_sales_limit_spin, 1, 4)
         overview_filters_layout.addWidget(refresh_reports_btn, 1, 2)
         overview_filters_layout.setColumnStretch(8, 1)
 
         overview_tables_splitter = QSplitter(Qt.Horizontal)
         overview_tables_splitter.setChildrenCollapsible(False)
         overview_tables_splitter.addWidget(trend_box)
-        overview_tables_splitter.addWidget(top_items_box)
+        sales_ops_splitter = QSplitter(Qt.Vertical)
+        sales_ops_splitter.setChildrenCollapsible(False)
+        sales_ops_splitter.addWidget(top_items_box)
+        sales_ops_splitter.addWidget(payment_box)
+        sales_ops_splitter.addWidget(recent_sales_box)
+        overview_tables_splitter.addWidget(sales_ops_splitter)
         overview_tables_splitter.setStretchFactor(0, 3)
         overview_tables_splitter.setStretchFactor(1, 2)
 
-        overview_layout.addWidget(title)
-        overview_layout.addWidget(subtitle)
+        self.waste_summary_label = QLabel("Waste in range: Qty 0.00 | Estimated Cost INR 0.00")
+        self.waste_summary_label.setStyleSheet("font-weight: 600; color: #f4d36a;")
+
         overview_layout.addWidget(overview_filters_box)
-        overview_layout.addLayout(cards_grid)
         overview_layout.addWidget(overview_tables_splitter)
 
         stock_tab = QWidget()
+        stock_tab.setObjectName("ReportsStockTab")
         stock_layout = QVBoxLayout(stock_tab)
         stock_refresh_btn = QPushButton("Refresh Stock and Audit")
+        stock_refresh_btn.setObjectName("PrimaryReportButton")
         stock_refresh_btn.clicked.connect(self.refresh_reports)
         stock_controls_box = QGroupBox("Stock Analysis Controls")
         stock_controls_layout = QHBoxLayout(stock_controls_box)
@@ -2401,10 +3306,13 @@ class MainWindow(QMainWindow):
         )
         self.audit_log_table.setColumnWidth(5, 340)
         refresh_audit_btn = QPushButton("Refresh Audit")
+        refresh_audit_btn.setObjectName("PrimaryReportButton")
         refresh_audit_btn.clicked.connect(self.refresh_reports)
         export_audit_csv_btn = QPushButton("Export Audit CSV")
+        export_audit_csv_btn.setObjectName("DataOpsExportButton")
         export_audit_csv_btn.clicked.connect(self.export_audit_csv)
         export_audit_xlsx_btn = QPushButton("Export Audit XLSX")
+        export_audit_xlsx_btn.setObjectName("DataOpsExportButton")
         export_audit_xlsx_btn.clicked.connect(self.export_audit_xlsx)
         audit_actions = QHBoxLayout()
         audit_actions.addWidget(refresh_audit_btn)
@@ -2447,6 +3355,7 @@ class MainWindow(QMainWindow):
             backup_btn,
             export_btn,
             restore_btn,
+            license_btn,
             export_reports_btn,
             export_reports_xlsx_btn,
             export_all_btn,
@@ -2455,29 +3364,13 @@ class MainWindow(QMainWindow):
             save_fixed_btn,
         ]
         for button in data_ops_buttons:
-            button.setMinimumHeight(34)
-            button.setMaximumHeight(34)
+            button.setMinimumHeight(38)
+            button.setMaximumHeight(38)
 
-        section_style = (
-            "QGroupBox {"
-            "border: 1px solid #3a5780;"
-            "border-radius: 6px;"
-            "margin-top: 10px;"
-            "padding-top: 8px;"
-            "background-color: #1b2a40;"
-            "}"
-            "QGroupBox::title {"
-            "subcontrol-origin: margin;"
-            "left: 10px;"
-            "padding: 0 4px;"
-            "color: #e5efff;"
-            "font-weight: 600;"
-            "}"
-        )
+
 
         role_and_close_box = QGroupBox("Access and Closing")
         role_and_close_box.setObjectName("DataOpsSectionBox")
-        role_and_close_box.setStyleSheet(section_style)
         role_and_close_layout = QHBoxLayout(role_and_close_box)
         role_and_close_layout.addWidget(QLabel("Role"))
         role_and_close_layout.addWidget(self.role_combo)
@@ -2486,16 +3379,15 @@ class MainWindow(QMainWindow):
 
         backup_actions_box = QGroupBox("Backup and Restore")
         backup_actions_box.setObjectName("DataOpsSectionBox")
-        backup_actions_box.setStyleSheet(section_style)
         backup_actions_layout = QHBoxLayout(backup_actions_box)
         backup_actions_layout.addWidget(backup_btn)
         backup_actions_layout.addWidget(export_btn)
         backup_actions_layout.addWidget(restore_btn)
+        backup_actions_layout.addWidget(license_btn)
         backup_actions_layout.addStretch()
 
         report_exports_box = QGroupBox("Reporting Exports")
         report_exports_box.setObjectName("DataOpsSectionBox")
-        report_exports_box.setStyleSheet(section_style)
         report_exports_layout = QHBoxLayout(report_exports_box)
         report_exports_layout.addWidget(export_reports_btn)
         report_exports_layout.addWidget(export_reports_xlsx_btn)
@@ -2507,29 +3399,26 @@ class MainWindow(QMainWindow):
         backup_automation_box.setObjectName("DataOpsSectionBox")
         fixed_cost_box.setObjectName("DataOpsSectionBox")
         daily_overhead_box.setObjectName("DataOpsSectionBox")
-        backup_automation_box.setStyleSheet(section_style)
-        fixed_cost_box.setStyleSheet(section_style)
-        daily_overhead_box.setStyleSheet(section_style)
 
         separator_one = QFrame()
         separator_one.setFrameShape(QFrame.HLine)
-        separator_one.setStyleSheet("color: #2b4363;")
+        separator_one.setStyleSheet(f"color: {self.THEME['border']};")
 
         separator_two = QFrame()
         separator_two.setFrameShape(QFrame.HLine)
-        separator_two.setStyleSheet("color: #2b4363;")
+        separator_two.setStyleSheet(f"color: {self.THEME['border']};")
 
         separator_three = QFrame()
         separator_three.setFrameShape(QFrame.HLine)
-        separator_three.setStyleSheet("color: #2b4363;")
+        separator_three.setStyleSheet(f"color: {self.THEME['border']};")
 
         separator_four = QFrame()
         separator_four.setFrameShape(QFrame.HLine)
-        separator_four.setStyleSheet("color: #2b4363;")
+        separator_four.setStyleSheet(f"color: {self.THEME['border']};")
 
         separator_five = QFrame()
         separator_five.setFrameShape(QFrame.HLine)
-        separator_five.setStyleSheet("color: #2b4363;")
+        separator_five.setStyleSheet(f"color: {self.THEME['border']};")
 
         data_ops_layout.addWidget(role_and_close_box)
         data_ops_layout.addWidget(separator_one)
@@ -2545,167 +3434,135 @@ class MainWindow(QMainWindow):
         data_ops_layout.addStretch()
 
         reports_tabs.addTab(overview_tab, "Overview")
-        reports_tabs.addTab(stock_tab, "Stock and Audit")
+        reports_tabs.addTab(stock_tab, "Stock & Audit")
         reports_tabs.addTab(data_ops_tab, "Data Ops")
 
-        reports_content = QWidget()
-        reports_content.setObjectName("ReportsContent")
-        reports_content_layout = QVBoxLayout(reports_content)
-        reports_content_layout.setContentsMargins(8, 8, 8, 8)
-        reports_content_layout.setSpacing(10)
-        reports_content_layout.addWidget(reports_tabs)
+        # Wrap everything in the reports tab in a single ScrollArea for perfect adaptability
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QFrame.NoFrame)
+        
+        main_container = QWidget()
+        main_container.setObjectName("ReportsContent")
+        main_layout = QVBoxLayout(main_container)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+        
+        main_layout.addWidget(title)
+        main_layout.addWidget(subtitle)
+        main_layout.addLayout(cards_grid)
+        main_layout.addWidget(self.waste_summary_label)
+        main_layout.addWidget(reports_tabs)
+        
+        main_scroll.setWidget(main_container)
+        root_layout.addWidget(main_scroll)
 
-        reports_scroll = QScrollArea()
-        reports_scroll.setWidgetResizable(True)
-        reports_scroll.setWidget(reports_content)
-
-        root_layout.addWidget(reports_scroll)
         self._apply_report_table_width_profiles()
         self._apply_reports_panel_style(tab)
 
         return tab
 
     def _apply_reports_panel_style(self, tab: QWidget) -> None:
-        tab.setStyleSheet(
-            "#ReportsPanel {"
-            "background-color: #141d2d;"
-            "}"
-            "#ReportsContent, #ReportsOverviewTab {"
-            "background-color: #141d2d;"
-            "}"
-            "#ReportsDataOpsTab {"
-            "background-color: #141d2d;"
-            "}"
-            "#ReportsDataOpsTab QGroupBox#DataOpsSectionBox {"
-            "background-color: #1b2a40;"
-            "border: 1px solid #3a5780;"
-            "}"
-            "#ReportsPanel QScrollArea {"
-            "background-color: #141d2d;"
-            "border: 0px;"
-            "}"
-            "#ReportsPanel QScrollArea > QWidget > QWidget {"
-            "background-color: #141d2d;"
-            "}"
-            "#ReportsPanel QGroupBox {"
-            "border: 1px solid #3f4b61;"
-            "border-radius: 8px;"
-            "margin-top: 8px;"
-            "padding-top: 8px;"
-            "background-color: #202734;"
-            "}"
-            "#ReportsPanel QGroupBox::title {"
-            "subcontrol-origin: margin;"
-            "left: 8px;"
-            "padding: 0 4px;"
-            "font-weight: 600;"
-            "color: #dce6f7;"
-            "}"
-            "#ReportsPanel QDateEdit,"
-            "#ReportsPanel QSpinBox,"
-            "#ReportsPanel QDoubleSpinBox,"
-            "#ReportsPanel QComboBox {"
-            "background-color: #121c2d;"
-            "color: #f1f6ff;"
-            "border: 1px solid #435b80;"
-            "border-radius: 6px;"
-            "padding: 5px 8px;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "}"
-            "#ReportsPanel QDateEdit::drop-down,"
-            "#ReportsPanel QComboBox::drop-down,"
-            "#ReportsPanel QSpinBox::up-button,"
-            "#ReportsPanel QSpinBox::down-button {"
-            "border: 0px;"
-            "width: 18px;"
-            "}"
-            "#ReportsPanel QDateEdit:focus,"
-            "#ReportsPanel QSpinBox:focus,"
-            "#ReportsPanel QDoubleSpinBox:focus,"
-            "#ReportsPanel QComboBox:focus {"
-            "border: 1px solid #58c6ff;"
-            "background-color: #1a2940;"
-            "}"
-            "#ReportsPanel QPushButton {"
-            "border-radius: 8px;"
-            "padding: 6px 12px;"
-            "border: 1px solid #4a5872;"
-            "background-color: #2d3a50;"
-            "color: #edf3fb;"
-            "}"
-            "#ReportsPanel QPushButton#PrimaryReportButton {"
-            "background-color: #2f7ee8;"
-            "border-color: #4e97f0;"
-            "font-weight: 700;"
-            "}"
-            "#ReportsPanel QPushButton#PrimaryReportButton:hover {"
-            "background-color: #3f8ff1;"
-            "}"
-            "#ReportsPanel QPushButton#ReportFilterPreset {"
-            "background-color: #334767;"
-            "border-color: #556e95;"
-            "font-weight: 600;"
-            "}"
-            "#ReportsPanel QPushButton#ReportFilterPreset:hover {"
-            "background-color: #3e5780;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsPrimaryButton {"
-            "background-color: #1e9a58;"
-            "border-color: #35b86f;"
-            "color: #ffffff;"
-            "font-weight: 700;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsPrimaryButton:hover {"
-            "background-color: #27ac66;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsWarningButton {"
-            "background-color: #a56a1f;"
-            "border-color: #c88a3b;"
-            "color: #fff7e8;"
-            "font-weight: 700;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsWarningButton:hover {"
-            "background-color: #b77b2d;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsDangerButton {"
-            "background-color: #9b2f3a;"
-            "border-color: #c04c5a;"
-            "color: #ffffff;"
-            "font-weight: 700;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsDangerButton:hover {"
-            "background-color: #ad3a47;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsExportButton {"
-            "background-color: #2f4f78;"
-            "border-color: #4f74a5;"
-            "color: #eaf3ff;"
-            "font-weight: 600;"
-            "}"
-            "#ReportsDataOpsTab QPushButton#DataOpsExportButton:hover {"
-            "background-color: #3b5f8f;"
-            "}"
-        )
+        T = self.THEME
+        tab.setStyleSheet(f"""
+            #ReportsPanel, #ReportsOverviewTab, #ReportsContent, #ReportsDataOpsTab, #ReportsStockTab, QWidget#ReportsDataOpsTab, QWidget#ReportsStockTab {{
+                background-color: {T['bg_deep']};
+            }}
+            QGroupBox {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+            }}
+            #ReportsPanel QGroupBox, #ReportsOverviewTab QGroupBox, #ReportsStockTab QGroupBox, #ReportsDataOpsTab QGroupBox {{
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 12px;
+                background-color: {T['bg_surface']};
+                margin-top: 15px;
+                padding-top: 20px;
+                color: {T['text_primary']};
+            }}
+            #ReportsPanel QGroupBox::title, #ReportsOverviewTab QGroupBox::title, #ReportsStockTab QGroupBox::title, #ReportsDataOpsTab QGroupBox::title {{
+                color: {T['text_primary']};
+                font-weight: bold;
+            }}
+            #ReportsPanel QScrollArea {{
+                background-color: transparent;
+                border: none;
+            }}
+            #ReportsPanel QScrollArea > QWidget {{
+                background-color: transparent;
+            }}
+            QPushButton#ReportFilterPreset {{
+                background-color: {T['bg_surface']};
+                color: {T['text_medium']};
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 15px;
+                padding: 6px 15px;
+                font-weight: 700;
+            }}
+            QPushButton#ReportFilterPreset:checked {{
+                background-color: {T['text_primary']};
+                color: white;
+                border-color: {T['text_primary']};
+            }}
+            
+            /* Data Ops & Primary Buttons */
+            #PrimaryReportButton, #DataOpsPrimaryButton {{
+                background-color: {T['accent_primary']};
+                color: white;
+                font-weight: 900;
+                border-radius: 8px;
+                padding: 10px 20px;
+                border: none;
+            }}
+            #DataOpsExportButton {{
+                background-color: {T['bg_surface']};
+                color: {T['text_primary']};
+                border: 1.5px solid {T['border_bold']};
+                font-weight: 700;
+                border-radius: 8px;
+                padding: 10px 20px;
+            }}
+            #DataOpsWarningButton {{
+                background-color: {T['accent_gold']};
+                color: white;
+                font-weight: 800;
+                border-radius: 8px;
+                padding: 10px 20px;
+                border: none;
+            }}
+            #DataOpsDangerButton {{
+                background-color: {T['danger']};
+                color: white;
+                font-weight: 800;
+                border-radius: 8px;
+                padding: 10px 20px;
+                border: none;
+            }}
+            
+            #ReportsPanel QHeaderView, #ReportsPanel QHeaderView::section {{
+                background-color: {T['bg_deep']};
+                color: {T['text_primary']};
+            }}
+        """)
 
     def _make_report_metric_card(self, heading: str, accent_color: str) -> tuple[QFrame, QLabel]:
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
-        card.setStyleSheet(
-            "QFrame {"
-            "border: 1px solid #3a3f4b;"
-            "border-radius: 8px;"
-            "background-color: #1f232b;"
-            "padding: 8px;"
-            "}"
-        )
+        card.setStyleSheet(f"""
+            QFrame {{
+                border: 1.5px solid {self.THEME['border_bold']};
+                border-radius: 12px;
+                background-color: {self.THEME['bg_surface']};
+                padding: 12px;
+            }}
+        """)
 
         layout = QVBoxLayout(card)
         title = QLabel(heading)
         title.setStyleSheet(f"color: {accent_color}; font-weight: bold;")
 
         value = QLabel("INR 0.00")
-        value.setStyleSheet("font-size: 17px; font-weight: bold; color: #f4f6fa;")
+        value.setStyleSheet(f"font-size: 20px; font-weight: 900; color: {self.THEME['text_primary']};")
 
         layout.addWidget(title)
         layout.addWidget(value)
@@ -2713,6 +3570,7 @@ class MainWindow(QMainWindow):
         return card, value
 
     def _style_report_table(self, table: QTableWidget) -> None:
+        T = self.THEME
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -2726,28 +3584,29 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setMinimumSectionSize(72)
         table.horizontalHeader().setDefaultSectionSize(122)
         table.verticalHeader().setDefaultSectionSize(34)
-        table.setStyleSheet(
-            "QTableWidget {"
-            "gridline-color: #304767;"
-            "alternate-background-color: #192842;"
-            "background-color: #142036;"
-            "border: 1px solid #375377;"
-            "border-radius: 6px;"
-            "selection-background-color: #2b77e7;"
-            "selection-color: #ffffff;"
-            "}"
-            "QTableWidget::item:hover {"
-            "background-color: #1f3b61;"
-            "}"
-            "QHeaderView::section {"
-            "background-color: #223654;"
-            "color: #eaf1ff;"
-            "padding: 8px 10px;"
-            "border: 0px;"
-            "border-right: 1px solid #3d5982;"
-            "font-weight: 600;"
-            "}"
-        )
+        table.setStyleSheet(f"""
+            QTableWidget {{
+                gridline-color: {T['border_bold']};
+                alternate-background-color: {T['bg_surface_light']};
+                background-color: {T['bg_surface']};
+                border: 1.5px solid {T['border_bold']};
+                border-radius: 8px;
+                selection-background-color: #e2e8f0;
+                selection-color: {T['text_primary']};
+                color: {T['text_primary']};
+            }}
+            QHeaderView::section {{
+                background-color: {T['bg_deep']};
+                color: {T['text_primary']};
+                padding: 8px 10px;
+                border: none;
+                border-right: 1px solid {T['border_bold']};
+                border-bottom: 2px solid {T['border_bold']};
+                font-weight: 800;
+                text-transform: uppercase;
+                font-size: 11px;
+            }}
+        """)
 
     def _apply_report_column_modes(self, table: QTableWidget, modes: list[QHeaderView.ResizeMode]) -> None:
         header = table.horizontalHeader()
@@ -2784,16 +3643,7 @@ class MainWindow(QMainWindow):
         return item
 
     def _table_rows_for_csv(self, table: QTableWidget) -> list[list[str]]:
-        headers = [table.horizontalHeaderItem(col).text() for col in range(table.columnCount())]
-        rows: list[list[str]] = [headers]
-
-        for row in range(table.rowCount()):
-            values: list[str] = []
-            for col in range(table.columnCount()):
-                cell = table.item(row, col)
-                values.append(cell.text() if cell is not None else "")
-            rows.append(values)
-        return rows
+        return table_rows_for_csv(table)
 
     @staticmethod
     def _set_date_edit_range(from_edit: QDateEdit, to_edit: QDateEdit, start: date, end: date) -> None:
@@ -2868,9 +3718,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _write_csv_file(path: str, rows: list[list[str]]) -> None:
-        with open(path, "w", newline="", encoding="utf-8-sig") as handle:
-            writer = csv.writer(handle)
-            writer.writerows(rows)
+        write_csv_file(path, rows)
 
     def _build_reports_csv_rows(self, start_date: str, end_date: str) -> list[list[str]]:
         rows: list[list[str]] = []
@@ -2883,9 +3731,11 @@ class MainWindow(QMainWindow):
         rows.append(["Gross Profit", self.gross_profit_value.text().replace("INR ", "")])
         rows.append(["Purchases", self.purchases_value.text().replace("INR ", "")])
         rows.append(["Expenses", self.expenses_value.text().replace("INR ", "")])
-        rows.append(["Fixed Cost / Day", self.fixed_daily_value.text().replace("INR ", "")])
-        rows.append(["Realistic Daily Profit", self.net_value.text().replace("INR ", "")])
+        rows.append(["Period Fixed Cost", self.fixed_daily_value.text().replace("INR ", "")])
+        rows.append(["Net Profit", self.net_value.text().replace("INR ", "")])
         rows.append(["Monthly Fixed Total", self.monthly_fixed_total_label.text().replace("Monthly Fixed Total: INR ", "")])
+        if hasattr(self, "waste_summary_label"):
+            rows.append(["Waste", self.waste_summary_label.text().replace("Waste in range: ", "")])
         rows.append([])
 
         rows.append(["Sales Trend"])
@@ -2895,6 +3745,16 @@ class MainWindow(QMainWindow):
         rows.append(["Top Selling Items"])
         rows.extend(self._table_rows_for_csv(self.top_items_table))
         rows.append([])
+
+        if hasattr(self, "payment_breakdown_table"):
+            rows.append(["Payment Breakdown"])
+            rows.extend(self._table_rows_for_csv(self.payment_breakdown_table))
+            rows.append([])
+
+        if hasattr(self, "recent_sales_table"):
+            rows.append(["Recent Sales"])
+            rows.extend(self._table_rows_for_csv(self.recent_sales_table))
+            rows.append([])
 
         rows.append(["Low Stock"])
         rows.extend(self._table_rows_for_csv(self.low_stock_table))
@@ -3003,11 +3863,13 @@ class MainWindow(QMainWindow):
 
     def refresh_all(self) -> None:
         self.refresh_categories()
+        self.refresh_recipe_tab()
         self.refresh_inventory()
         self.refresh_billing_items()
         self.refresh_purchases_tab()
         self.refresh_expenses_tab()
         self.refresh_reports()
+        self._apply_role_permissions()
 
     def refresh_categories(self) -> None:
         categories = self.inventory_service.list_categories()
@@ -3084,10 +3946,18 @@ class MainWindow(QMainWindow):
 
     def refresh_purchases_tab(self) -> None:
         items = self.inventory_service.list_items()
-        self.purchase_item_cache = {int(item["id"]): item for item in items}
+        
+        # Only include items that are purchased (ingredients or manual-costing packed goods).
+        # Items with 'recipe' costing mode are made in-house and cannot be directly purchased.
+        purchasable_items = [
+            item for item in items 
+            if item.get("costing_mode", "manual") == "manual"
+        ]
+        
+        self.purchase_item_cache = {int(item["id"]): item for item in purchasable_items}
 
         self.purchase_item_combo.clear()
-        for item in items:
+        for item in purchasable_items:
             self.purchase_item_combo.addItem(
                 f"{item['name']} (Stock {item['stock_quantity']:.2f})",
                 int(item["id"]),
@@ -3177,19 +4047,44 @@ class MainWindow(QMainWindow):
         item_id = self.purchase_item_combo.currentData()
         if item_id is None:
             self.purchase_stock_preview_label.setText("")
+            if hasattr(self, "purchase_stock_card"):
+                self.purchase_stock_card.setText("📦 Stock: --")
+                self.purchase_stock_card.setStyleSheet("")
             return
 
         item = self.purchase_item_cache.get(int(item_id))
         if item is None:
             self.purchase_stock_preview_label.setText("")
+            if hasattr(self, "purchase_stock_card"):
+                self.purchase_stock_card.setText("📦 Stock: --")
+                self.purchase_stock_card.setStyleSheet("")
             return
 
         current_stock = float(item.get("stock_quantity") or 0)
+        reorder = float(item.get("reorder_level") or 0)
         added_qty = float(self.purchase_qty_spin.value())
         projected_stock = current_stock + added_qty
         self.purchase_stock_preview_label.setText(
-            f"Stock after purchase: {current_stock:.2f} -> {projected_stock:.2f}"
+            f"Stock after purchase: {current_stock:.2f} → {projected_stock:.2f}"
         )
+
+        # Update visual stock card
+        if hasattr(self, "purchase_stock_card"):
+            T = self.THEME
+            if current_stock <= 0:
+                color, bg = T["danger"], "#fef2f2"
+                icon = "🔴"
+            elif current_stock <= reorder:
+                color, bg = T["accent_gold"], "#fff9eb"
+                icon = "🟡"
+            else:
+                color, bg = T["success"], "#f0fdf4"
+                icon = "🟢"
+            self.purchase_stock_card.setText(f"{icon} Stock: {current_stock:.1f}")
+            self.purchase_stock_card.setStyleSheet(
+                f"color: {color}; font-weight: 800; border: 1.5px solid {color}; "
+                f"border-radius: 8px; background-color: {bg}; padding: 4px 10px; font-size: 12px;"
+            )
 
     def add_purchase_line(self) -> None:
         item_id = self.purchase_item_combo.currentData()
@@ -3338,6 +4233,8 @@ class MainWindow(QMainWindow):
         self.purchase_empty_state_label.setVisible(len(self.purchase_cart) == 0)
 
         self.purchase_total_label.setText(f"TOTAL: INR {total:.2f}")
+        if hasattr(self, "purchase_line_count_card"):
+            self.purchase_line_count_card.setText(f"🧾 Lines: {len(self.purchase_cart)}")
 
     def _on_purchase_line_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating_purchase_table:
@@ -3504,119 +4401,125 @@ class MainWindow(QMainWindow):
     def refresh_billing_items(self) -> None:
         items = self.inventory_service.list_items()
         self.billing_items_cache = [i for i in items if (i.get("item_kind") or "sellable") == "sellable"]
-        self.apply_billing_filter()
-        self.refresh_cigarette_quick_buttons()
+        self.current_category_filter = getattr(self, 'current_category_filter', None)
+        self._petpooja_render_categories_and_grid(self.current_category_filter)
+        self._refresh_billing_low_ingredient_alerts()
+        self._refresh_cost_preview_panel()
         self._update_billing_dashboard_metrics()
 
-    def refresh_cigarette_quick_buttons(self) -> None:
-        grouped = self.inventory_service.cigarette_items_grouped()
+    def _petpooja_render_categories_and_grid(self, filter_category_id: int | None = None) -> None:
+        self.billing_controller.render_categories_and_grid(filter_category_id)
+        return
 
-        self._clear_layout(self.small_buttons_layout)
-        self._clear_layout(self.medium_buttons_layout)
-        self._clear_layout(self.big_buttons_layout)
-        for shortcut in self.cigarette_shortcuts:
-            shortcut.setParent(None)
-        self.cigarette_shortcuts = []
+        if not hasattr(self, "billing_category_tabs_layout"):
+            return
+            
+        self.current_category_filter = filter_category_id
+        
+        # Only show categories that have at least one sellable item in our cache
+        sellable_cat_ids = {i.get("category_id") for i in self.billing_items_cache if i.get("category_id")}
+        categories = [c for c in self.inventory_service.list_categories() if c["id"] in sellable_cat_ids]
+        
+        while self.billing_category_tabs_layout.count():
+            child = self.billing_category_tabs_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+                
+        all_btn = QPushButton("All Items")
+        all_btn.setObjectName("CategoryTab")
+        all_btn.setCheckable(True)
+        all_btn.setChecked(filter_category_id is None)
+        all_btn.clicked.connect(lambda: self._petpooja_render_categories_and_grid(None))
+        self.billing_category_tabs_layout.addWidget(all_btn)
+        
+        for c in categories:
+            btn = QPushButton(c["name"])
+            btn.setObjectName("CategoryTab")
+            btn.setCheckable(True)
+            btn.setChecked(filter_category_id == c["id"])
+            btn.clicked.connect(lambda _, cid=c["id"]: self._petpooja_render_categories_and_grid(cid))
+            self.billing_category_tabs_layout.addWidget(btn)
+            
+        self.billing_category_tabs_layout.addStretch()
 
-        shortcut_number = 1
-        shortcut_number = self._populate_quick_row(
-            layout=self.small_buttons_layout,
-            items=grouped.get("small", []),
-            color="#2e8f56",
-            start_shortcut=shortcut_number,
-        )
-        shortcut_number = self._populate_quick_row(
-            layout=self.medium_buttons_layout,
-            items=grouped.get("medium", []),
-            color="#cf8a21",
-            start_shortcut=shortcut_number,
-        )
-        self._populate_quick_row(
-            layout=self.big_buttons_layout,
-            items=grouped.get("big", []),
-            color="#b44b4b",
-            start_shortcut=shortcut_number,
-        )
+        while self.billing_quick_grid_layout.count():
+            child = self.billing_quick_grid_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+                
+        query = ""
+        if hasattr(self, "search_input"):
+            query = self.search_input.text().strip().lower()
 
-    def _populate_quick_row(
-        self,
-        layout: QHBoxLayout,
-        items: list[dict],
-        color: str,
-        start_shortcut: int,
-    ) -> int:
-        shortcut_number = start_shortcut
-        for item in items:
-            label = f"{item['name']} {item['selling_price']:.0f}"
-            if 1 <= shortcut_number <= 9:
-                label += f" ({shortcut_number})"
-            btn = QPushButton(label)
-            btn.setStyleSheet(
-                f"background-color: {color};"
-                "color: white;"
-                "font-weight: 700;"
-                "font-size: 13px;"
-                "border-radius: 10px;"
-                "padding: 8px 11px;"
-                "min-height: 34px;"
-                "border: 1px solid rgba(255,255,255,0.18);"
-            )
-            btn.clicked.connect(lambda _, item_id=item["id"]: self.add_item_to_cart_by_id(item_id))
-            layout.addWidget(btn)
+        filtered = self.billing_items_cache
+        if filter_category_id is not None:
+            filtered = [i for i in filtered if i.get("category_id") == filter_category_id]
+        if query:
+            filtered = [i for i in filtered if query in i["name"].lower()]
 
-            if 1 <= shortcut_number <= 9:
-                sc = QShortcut(QKeySequence(str(shortcut_number)), self)
-                sc.activated.connect(lambda item_id=item["id"]: self.add_item_to_cart_by_id(item_id))
-                self.cigarette_shortcuts.append(sc)
-            shortcut_number += 1
+        if not filtered:
+            self.billing_empty_state_label.setText("No items match. Try searching something else.")
+            self.billing_empty_state_label.setVisible(True)
+        else:
+            self.billing_empty_state_label.setVisible(False)
+            width = max(self.width(), 1000)
+            cols = 5 if width >= 1600 else 4 if width >= 1280 else 3 if width >= 1020 else 2
+            row, col = 0, 0
+            for item in filtered:
+                btn = QPushButton(f"{item['name']}\n₹{item['selling_price']:.0f}")
+                btn.setObjectName("QuickAddItem")
+                btn.setMinimumHeight(82)
+                btn.setMinimumWidth(112)
+                tint = self._category_tint(item.get("category_id"))
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {tint['bg']};
+                        border: 1.5px solid {tint['border']};
+                        border-radius: 14px;
+                        color: {self.THEME['text_primary']};
+                        font-weight: 800;
+                        font-size: 12px;
+                        padding: 6px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {tint['border']};
+                        color: white;
+                    }}
+                """)
+                btn.clicked.connect(lambda _, iid=item["id"]: self._handle_quick_add(iid))
+                self.billing_quick_grid_layout.addWidget(btn, row, col)
+                col += 1
+                if col >= cols:
+                    col = 0
+                    row += 1
 
-        layout.addStretch()
-        return shortcut_number
+    def _handle_quick_add(self, item_id: int) -> None:
+        self.add_item_to_cart_by_id(item_id, quantity=1.0)
 
-    @staticmethod
-    def _clear_layout(layout: QHBoxLayout) -> None:
-        while layout.count():
-            child = layout.takeAt(0)
-            widget = child.widget()
-            if widget is not None:
-                widget.deleteLater()
+    def _category_tint(self, category_id: int | None) -> dict[str, str]:
+        palette = [
+            {"bg": "#fff7ed", "border": "#f59e0b", "hover": "#ffedd5"},
+            {"bg": "#eff6ff", "border": "#3b82f6", "hover": "#dbeafe"},
+            {"bg": "#ecfdf5", "border": "#10b981", "hover": "#d1fae5"},
+            {"bg": "#fff1f2", "border": "#f43f5e", "hover": "#ffe4e6"},
+            {"bg": "#f8fafc", "border": "#64748b", "hover": "#e2e8f0"},
+            {"bg": "#f0fdfa", "border": "#14b8a6", "hover": "#ccfbf1"},
+        ]
+        if category_id is None:
+            return {
+                "bg": self.THEME["bg_surface"],
+                "border": self.THEME["border_bold"],
+                "hover": self.THEME["bg_surface_light"],
+            }
+        return palette[int(category_id) % len(palette)]
 
     def apply_billing_filter(self) -> None:
-        query = self.search_input.text().strip().lower()
-        if query:
-            filtered = [i for i in self.billing_items_cache if query in i["name"].lower()]
-        else:
-            filtered = self.billing_items_cache
-
-        self._filtered_billing_count = len(filtered)
-
-        table = self.billing_items_table
-        table.setRowCount(len(filtered))
-
-        for row_index, item in enumerate(filtered):
-            name_item = QTableWidgetItem(item["name"])
-            name_item.setData(Qt.UserRole, int(item["id"]))
-            table.setItem(row_index, 0, name_item)
-            table.setItem(row_index, 1, QTableWidgetItem(f"{item['selling_price']:.2f}"))
-            table.setItem(row_index, 2, QTableWidgetItem(f"{item['stock_quantity']:.2f}"))
-
-        if len(filtered) > 0:
-            table.selectRow(0)
-            self.billing_empty_state_label.setVisible(False)
-        else:
-            if query:
-                self.billing_empty_state_label.setText(
-                    f"No items match '{query}'. Try a broader keyword or click Refresh Items."
-                )
-            else:
-                self.billing_empty_state_label.setText(
-                    "No billing items available. Add stock in Inventory or click Refresh Items."
-                )
-            self.billing_empty_state_label.setVisible(True)
-
-        self._update_billing_dashboard_metrics()
+        self._petpooja_render_categories_and_grid(getattr(self, 'current_category_filter', None))
 
     def _update_billing_dashboard_metrics(self, total_amount: float | None = None) -> None:
+        self.billing_controller.update_metrics(total_amount)
+        return
+
         if not hasattr(self, "billing_cart_lines_value"):
             return
 
@@ -3634,6 +4537,58 @@ class MainWindow(QMainWindow):
                 total_amount = 0.0
         self.billing_total_value.setText(f"INR {total_amount:.2f}")
         self.total_label.setText(f"TOTAL: INR {total_amount:.2f}")
+
+    def _refresh_billing_low_ingredient_alerts(self) -> None:
+        if not hasattr(self, "billing_low_ingredients_list"):
+            return
+        low_ingredients = self.inventory_service.low_ingredient_items()
+        self.billing_low_ingredients_list.clear()
+        if not low_ingredients:
+            self.billing_low_ingredients_list.addItem("All ingredient stock is healthy.")
+            return
+        for row in low_ingredients:
+            self.billing_low_ingredients_list.addItem(
+                f"{row['name']} | Stock {float(row['stock_quantity']):.2f} / Reorder {float(row['reorder_level']):.2f}"
+            )
+
+    def _refresh_cost_preview_panel(self) -> None:
+        if not hasattr(self, "cost_preview_table"):
+            return
+
+        cart_items = [
+            {"item_id": item["item_id"], "quantity": item["quantity"]}
+            for item in self.cart.values()
+        ]
+        if not cart_items:
+            self.cost_preview_table.setRowCount(0)
+            self.cost_preview_label.setText("Estimated COGS: INR 0.00 | Estimated Margin: INR 0.00")
+            return
+
+        preview = self.sales_service.preview_cart_costing(cart_items)
+        rows = preview.get("rows", [])
+        self.cost_preview_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            self.cost_preview_table.setItem(row_index, 0, QTableWidgetItem(str(row.get("name") or "")))
+            qty_item = QTableWidgetItem(f"{float(row.get('quantity') or 0):.2f}")
+            qty_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.cost_preview_table.setItem(row_index, 1, qty_item)
+            unit_cost_item = QTableWidgetItem(f"{float(row.get('est_unit_cost') or 0):.2f}")
+            unit_cost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.cost_preview_table.setItem(row_index, 2, unit_cost_item)
+            line_cost_item = QTableWidgetItem(f"{float(row.get('est_line_cost') or 0):.2f}")
+            line_cost_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.cost_preview_table.setItem(row_index, 3, line_cost_item)
+            margin_item = QTableWidgetItem(f"{float(row.get('est_margin') or 0):.2f}")
+            margin_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.cost_preview_table.setItem(row_index, 4, margin_item)
+
+        warnings = preview.get("warnings", [])
+        warning_suffix = f" | Warnings: {len(warnings)}" if warnings else ""
+        self.cost_preview_label.setText(
+            f"Estimated COGS: INR {float(preview.get('total_est_cost') or 0):.2f} | "
+            f"Estimated Margin: INR {float(preview.get('est_margin') or 0):.2f}"
+            f"{warning_suffix}"
+        )
 
     def _on_item_kind_changed(self) -> None:
         kind = self.item_kind_combo.currentData() if hasattr(self, "item_kind_combo") else "sellable"
@@ -3708,253 +4663,47 @@ class MainWindow(QMainWindow):
         entity_id: str = "",
         details: str = "",
     ) -> None:
-        try:
-            self.bookkeeping_service.log_audit(
-                actor_role=self.current_role,
-                action_type=action_type,
-                entity_type=entity_type,
-                entity_id=entity_id,
-                details=details,
-            )
-        except Exception:
-            pass
+        self.ops_controller.log_audit(action_type, entity_type, entity_id, details)
 
     def _ask_admin_pin(self) -> str | None:
-        pin, ok = QInputDialog.getText(self, "Admin PIN", "Enter admin PIN:")
-        if not ok:
-            return None
-        return pin.strip()
+        return self.ops_controller.ask_admin_pin()
 
     def _require_admin_access(self, action_name: str) -> str | None:
-        if self.current_role == "admin":
-            return self.bookkeeping_service.get_setting("admin_pin", "1234") or "1234"
-
-        pin = self._ask_admin_pin()
-        if pin is None:
-            return None
-        if not self.bookkeeping_service.verify_admin_pin(pin):
-            QMessageBox.warning(self, action_name, "Invalid admin PIN.")
-            return None
-        return pin
+        return self.ops_controller.require_admin_access(action_name)
 
     def on_role_changed(self, role_name: str) -> None:
-        role = role_name.strip().lower()
-        if role == self.current_role:
-            return
+        self.ops_controller.on_role_changed(role_name)
 
-        if role == "admin":
-            pin = self._ask_admin_pin()
-            if pin is None or not self.bookkeeping_service.verify_admin_pin(pin):
-                QMessageBox.warning(self, "Role Switch", "Admin PIN verification failed.")
-                self.role_combo.blockSignals(True)
-                self.role_combo.setCurrentText(self.current_role)
-                self.role_combo.blockSignals(False)
-                return
-
-        self.current_role = role
-        self.bookkeeping_service.set_setting("current_role", role)
-        self._log_audit("role_switch", "session", "current", f"Role changed to {role}")
+    def _apply_role_permissions(self) -> None:
+        self.ops_controller.apply_role_permissions()
 
     def _configure_auto_backup_timer(self) -> None:
-        enabled = (self.bookkeeping_service.get_setting("auto_backup_enabled", "0") or "0") == "1"
-        interval_str = self.bookkeeping_service.get_setting("backup_interval_minutes", "60") or "60"
-        try:
-            interval_minutes = max(5, int(float(interval_str)))
-        except ValueError:
-            interval_minutes = 60
-
-        if hasattr(self, "auto_backup_enabled_checkbox"):
-            self.auto_backup_enabled_checkbox.setChecked(enabled)
-        if hasattr(self, "auto_backup_interval_spin"):
-            self.auto_backup_interval_spin.setValue(interval_minutes)
-
-        self.auto_backup_timer.stop()
-        if enabled:
-            self.auto_backup_timer.setInterval(interval_minutes * 60 * 1000)
-            self.auto_backup_timer.start()
+        self.ops_controller.configure_auto_backup_timer()
 
     def save_backup_preferences(self) -> None:
-        enabled = self.auto_backup_enabled_checkbox.isChecked()
-        interval = int(self.auto_backup_interval_spin.value())
-        self.bookkeeping_service.set_setting("auto_backup_enabled", "1" if enabled else "0")
-        self.bookkeeping_service.set_setting("backup_interval_minutes", str(interval))
-        self._configure_auto_backup_timer()
-        self._log_audit(
-            "backup_schedule_update",
-            "settings",
-            "auto_backup",
-            f"enabled={enabled}, interval_minutes={interval}",
-        )
-        QMessageBox.information(self, "Backup Schedule", "Backup schedule updated.")
+        self.ops_controller.save_backup_preferences()
 
     def _run_scheduled_backup(self) -> None:
-        try:
-            backup_path = create_backup(db_path=self.db_path)
-            self._log_audit("scheduled_backup", "backup", str(backup_path), "Automatic backup completed")
-        except Exception as exc:
-            self._log_audit("scheduled_backup_failed", "backup", "", str(exc))
+        self.ops_controller.run_scheduled_backup()
+
+    def manage_license(self) -> None:
+        self.ops_controller.manage_license()
 
     @staticmethod
     def _format_restore_preview(current_counts: dict, backup_counts: dict, backup_file: str) -> str:
-        lines = [
-            "Restoring will overwrite current live database.",
-            "",
-            f"Backup file: {backup_file}",
-            "",
-            "Current DB -> Backup DB",
-            f"Items: {current_counts.get('items', 0)} -> {backup_counts.get('items', 0)}",
-            f"Sales: {current_counts.get('sales', 0)} -> {backup_counts.get('sales', 0)}",
-            f"Purchases: {current_counts.get('purchases', 0)} -> {backup_counts.get('purchases', 0)}",
-            f"Expenses: {current_counts.get('expenses', 0)} -> {backup_counts.get('expenses', 0)}",
-            f"Stock Movements: {current_counts.get('stock_movements', 0)} -> {backup_counts.get('stock_movements', 0)}",
-            "",
-            "Continue with restore?",
-        ]
-        return "\n".join(lines)
+        return MainWindowOpsController.format_restore_preview(current_counts, backup_counts, backup_file)
 
     def export_reports_xlsx(self) -> None:
-        try:
-            from openpyxl import Workbook
-        except Exception:
-            QMessageBox.warning(self, "XLSX Export", "openpyxl is not installed. Run: pip install openpyxl")
-            return
-
-        start_date, end_date = self._iso_range_from_edits(self.report_from_date, self.report_to_date)
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save XLSX",
-            f"reports_{self._range_suffix(start_date, end_date)}.xlsx",
-            "Excel Workbook (*.xlsx)",
-        )
-        if not path:
-            return
-
-        wb = Workbook()
-        ws_summary = wb.active
-        ws_summary.title = "Summary"
-        ws_summary.append(["Metric", "Value"])
-        ws_summary.append(["From", start_date])
-        ws_summary.append(["To", end_date])
-        ws_summary.append(["Sales", self.sales_value.text().replace("INR ", "")])
-        ws_summary.append(["COGS", self.cogs_value.text().replace("INR ", "")])
-        ws_summary.append(["Gross Profit", self.gross_profit_value.text().replace("INR ", "")])
-        ws_summary.append(["Purchases", self.purchases_value.text().replace("INR ", "")])
-        ws_summary.append(["Expenses", self.expenses_value.text().replace("INR ", "")])
-        ws_summary.append(["Fixed Cost / Day", self.fixed_daily_value.text().replace("INR ", "")])
-        ws_summary.append(["Realistic Daily Profit", self.net_value.text().replace("INR ", "")])
-
-        table_sheets = [
-            ("SalesTrend", self.sales_trend_table),
-            ("TopItems", self.top_items_table),
-            ("LowStock", self.low_stock_table),
-            ("StockLedger", self.ledger_table),
-        ]
-        for sheet_name, table in table_sheets:
-            ws = wb.create_sheet(title=sheet_name)
-            for row in self._table_rows_for_csv(table):
-                ws.append(row)
-
-        try:
-            wb.save(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "XLSX Export", f"Failed to save XLSX: {exc}")
-            return
-
-        self._log_audit("xlsx_export", "report", "range", f"{start_date}..{end_date}")
-        if self.open_after_export_checkbox.isChecked() and hasattr(os, "startfile"):
-            try:
-                os.startfile(path)
-            except Exception:
-                pass
-        QMessageBox.information(self, "XLSX Export", f"XLSX exported successfully:\n{path}")
+        self.ops_controller.export_reports_xlsx()
 
     def export_printable_summary(self) -> None:
-        start_date, end_date = self._iso_range_from_edits(self.report_from_date, self.report_to_date)
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Printable Summary",
-            f"summary_{self._range_suffix(start_date, end_date)}.txt",
-            "Text Files (*.txt)",
-        )
-        if not path:
-            return
-
-        lines = [
-            "Cafe POS - Printable Summary",
-            f"Range: {start_date} to {end_date}",
-            "",
-            f"Sales: {self.sales_value.text()}",
-            f"COGS: {self.cogs_value.text()}",
-            f"Gross Profit: {self.gross_profit_value.text()}",
-            f"Purchases: {self.purchases_value.text()}",
-            f"Expenses: {self.expenses_value.text()}",
-            f"Fixed Cost / Day: {self.fixed_daily_value.text()}",
-            f"Realistic Daily Profit: {self.net_value.text()}",
-            "",
-            "Top Selling Items:",
-        ]
-        for row in range(min(self.top_items_table.rowCount(), 15)):
-            item = self.top_items_table.item(row, 0).text() if self.top_items_table.item(row, 0) else ""
-            qty = self.top_items_table.item(row, 1).text() if self.top_items_table.item(row, 1) else ""
-            value = self.top_items_table.item(row, 2).text() if self.top_items_table.item(row, 2) else ""
-            lines.append(f"- {item}: qty {qty}, value {value}")
-
-        try:
-            Path(path).write_text("\n".join(lines), encoding="utf-8")
-        except Exception as exc:
-            QMessageBox.critical(self, "Printable Summary", f"Failed: {exc}")
-            return
-
-        self._log_audit("printable_summary_export", "report", "range", f"{start_date}..{end_date}")
-        if self.open_after_export_checkbox.isChecked() and hasattr(os, "startfile"):
-            try:
-                os.startfile(path)
-            except Exception:
-                pass
-        QMessageBox.information(self, "Printable Summary", f"Summary exported:\n{path}")
+        self.ops_controller.export_printable_summary()
 
     def export_audit_csv(self) -> None:
-        if not hasattr(self, "audit_log_table"):
-            return
-        rows = self._table_rows_for_csv(self.audit_log_table)
-        self._save_csv_rows("audit_log_export.csv", rows)
-        self._log_audit("audit_export_csv", "audit_log", "table", "audit log exported as csv")
+        self.ops_controller.export_audit_csv()
 
     def export_audit_xlsx(self) -> None:
-        try:
-            from openpyxl import Workbook
-        except Exception:
-            QMessageBox.warning(self, "Audit XLSX", "openpyxl is not installed. Run: pip install openpyxl")
-            return
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Audit XLSX",
-            "audit_log_export.xlsx",
-            "Excel Workbook (*.xlsx)",
-        )
-        if not path:
-            return
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "AuditLog"
-        for row in self._table_rows_for_csv(self.audit_log_table):
-            ws.append(row)
-
-        try:
-            wb.save(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Audit XLSX", f"Failed to save XLSX: {exc}")
-            return
-
-        self._log_audit("audit_export_xlsx", "audit_log", "table", "audit log exported as xlsx")
-        if self.open_after_export_checkbox.isChecked() and hasattr(os, "startfile"):
-            try:
-                os.startfile(path)
-            except Exception:
-                pass
-        QMessageBox.information(self, "Audit XLSX", f"Audit XLSX exported successfully:\n{path}")
+        self.ops_controller.export_audit_xlsx()
 
     def manage_selected_item_recipe(self) -> None:
         item = self._selected_inventory_item()
@@ -4143,11 +4892,17 @@ class MainWindow(QMainWindow):
         if not ok_sell:
             return
 
+        cached = next(
+            (i for i in self.inventory_items_cache if int(i["id"]) == int(item["item_id"])),
+            None,
+        )
+        current_cost = float(cached["cost_price"]) if cached else 0.0
+
         new_cost, ok_cost = QInputDialog.getDouble(
             self,
             "Update Cost Price",
             f"New cost price for {item['name']}",
-            value=0,
+            value=current_cost,
             minValue=0,
             decimals=2,
         )
@@ -4207,6 +4962,49 @@ class MainWindow(QMainWindow):
         self.refresh_reports()
         self._log_audit("manual_stock_adjust", "item", str(item["item_id"]), f"delta={float(quantity_delta):.2f}, notes={notes}")
 
+    def record_selected_item_waste(self) -> None:
+        item = self._selected_inventory_item()
+        if item is None:
+            return
+
+        pin = self._require_admin_access("Record Waste")
+        if pin is None:
+            return
+
+        quantity, ok_qty = QInputDialog.getDouble(
+            self,
+            "Record Waste",
+            "Waste quantity:",
+            value=1.0,
+            minValue=0.01,
+            decimals=2,
+        )
+        if not ok_qty:
+            return
+
+        notes, ok_notes = QInputDialog.getText(self, "Waste Reason", "Reason for waste:")
+        if not ok_notes:
+            return
+
+        try:
+            self.inventory_service.record_waste(
+                item_id=item["item_id"],
+                quantity=float(quantity),
+                admin_pin=pin,
+                notes=notes,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Record Waste", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Record Waste", str(exc))
+            return
+
+        self.refresh_inventory()
+        self.refresh_billing_items()
+        self.refresh_reports()
+        self._log_audit("waste_record", "item", str(item["item_id"]), f"qty={float(quantity):.2f}, notes={notes}")
+
     def load_starter_cigarettes(self) -> None:
         try:
             created = self.inventory_service.load_starter_cigarette_items()
@@ -4255,31 +5053,23 @@ class MainWindow(QMainWindow):
         self.refresh_reports()
         self._log_audit("item_delete", "item", str(item["item_id"]), item["name"])
 
-    def _on_catalog_double_click(self, row: int, _: int) -> None:
-        self.billing_items_table.selectRow(row)
+    def add_item_to_cart_by_id(self, item_id: int, quantity: float = 1.0) -> None:
+        self.billing_controller.add_item_to_cart_by_id(item_id, quantity)
+        return
 
-    def _on_catalog_single_click(self, row: int, _: int) -> None:
-        self.billing_items_table.selectRow(row)
-        self.add_selected_item_to_cart()
-
-    def add_item_to_cart_by_id(self, item_id: int, quantity: float | None = None) -> None:
         item = next((i for i in self.billing_items_cache if int(i["id"]) == int(item_id)), None)
         if item is None:
             QMessageBox.warning(self, "Item Missing", "Selected item is no longer available.")
             return
 
-        qty = float(quantity if quantity is not None else self.qty_spin.value())
+        qty = float(quantity)
         existing_qty = float(self.cart.get(item_id, {}).get("quantity", 0))
         stock_tracked = int(item.get("is_stock_tracked", 1)) == 1
         recipe_costed = (item.get("costing_mode") or "manual") == "recipe"
         if stock_tracked and not recipe_costed:
             available_stock = float(item["stock_quantity"])
             if qty + existing_qty > available_stock:
-                QMessageBox.warning(
-                    self,
-                    "Insufficient Stock",
-                    f"Requested quantity exceeds available stock ({available_stock:.2f}).",
-                )
+                self.show_toast(f"Insufficient Stock ({available_stock:.0f} max)", is_error=True)
                 return
 
         self.cart[item_id] = {
@@ -4291,25 +5081,14 @@ class MainWindow(QMainWindow):
         self.refresh_cart_table()
         QApplication.beep()
 
-    def add_selected_item_to_cart(self) -> None:
-        selected = self.billing_items_table.currentRow()
-        if selected < 0:
-            QMessageBox.information(self, "Select Item", "Please select an item first.")
-            return
-
-        item_cell = self.billing_items_table.item(selected, 0)
-        if item_cell is None:
-            return
-        item_id = int(item_cell.data(Qt.UserRole))
-        self.add_item_to_cart_by_id(item_id)
-
     def _selected_cart_item_id(self) -> int | None:
         selected = self.cart_table.currentRow()
         if selected < 0:
-            QMessageBox.information(self, "Select Cart Item", "Please select an item in the cart.")
+            self.show_toast("Select an item in the cart first", is_error=True)
             return None
 
-        return int(self.cart_table.item(selected, 0).text())
+        cell = self.cart_table.item(selected, 0)
+        return int(cell.data(Qt.UserRole)) if cell else None
 
     def remove_selected_cart_item(self) -> None:
         item_id = self._selected_cart_item_id()
@@ -4324,27 +5103,24 @@ class MainWindow(QMainWindow):
         if item_id is None:
             return
 
-        self.add_item_to_cart_by_id(item_id, quantity=float(self.qty_spin.value()))
+        self.add_item_to_cart_by_id(item_id, quantity=1.0)
 
     def decrease_selected_cart_item_qty(self) -> None:
         item_id = self._selected_cart_item_id()
         if item_id is None:
             return
 
-        line = self.cart.get(item_id)
-        if line is None:
-            return
-
-        next_qty = float(line["quantity"]) - float(self.qty_spin.value())
-        if next_qty <= 0:
-            self.cart.pop(item_id, None)
+        current_qty = self.cart[item_id]["quantity"]
+        if current_qty > 1:
+            self.cart[item_id]["quantity"] = current_qty - 1
         else:
-            line["quantity"] = next_qty
-            self.cart[item_id] = line
-
+            self.cart.pop(item_id)
         self.refresh_cart_table()
 
     def refresh_cart_table(self) -> None:
+        self.billing_controller.refresh_cart_table()
+        return
+
         items = list(self.cart.values())
         self.cart_table.setRowCount(len(items))
 
@@ -4353,12 +5129,15 @@ class MainWindow(QMainWindow):
             line_total = item["quantity"] * item["unit_price"]
             total += line_total
 
-            self.cart_table.setItem(row_index, 0, QTableWidgetItem(str(item["item_id"])))
-            self.cart_table.setItem(row_index, 1, QTableWidgetItem(item["name"]))
-            self.cart_table.setItem(row_index, 2, QTableWidgetItem(f"{item['quantity']:.2f}"))
-            self.cart_table.setItem(row_index, 3, QTableWidgetItem(f"{item['unit_price']:.2f}"))
-            self.cart_table.setItem(row_index, 4, QTableWidgetItem(f"{line_total:.2f}"))
+            name_item = QTableWidgetItem(item["name"])
+            name_item.setData(Qt.UserRole, int(item["item_id"]))
+            self.cart_table.setItem(row_index, 0, name_item)
+            self.cart_table.setItem(row_index, 1, QTableWidgetItem(f"{item['quantity']:.2f}"))
+            self.cart_table.setItem(row_index, 2, QTableWidgetItem(f"{item['unit_price']:.2f}"))
+            self.cart_table.setItem(row_index, 3, QTableWidgetItem(f"{line_total:.2f}"))
 
+        if hasattr(self, "_refresh_cost_preview_panel"):
+            self._refresh_cost_preview_panel()
         self._update_billing_dashboard_metrics(total_amount=total)
 
     def clear_cart(self) -> None:
@@ -4367,16 +5146,37 @@ class MainWindow(QMainWindow):
         if self.cart_file.exists():
             self.cart_file.unlink(missing_ok=True)
 
+    def _trigger_petpooja_checkout(self, method: str) -> None:
+        idx = self.payment_method_combo.findData(method)
+        if idx >= 0:
+            self.payment_method_combo.setCurrentIndex(idx)
+        self.checkout()
+
     def checkout(self) -> None:
+        if not self.cart:
+            self.show_toast("Cart is empty!", is_error=True)
+            return
+
         cart_items = [
             {"item_id": item["item_id"], "quantity": item["quantity"]}
             for item in self.cart.values()
         ]
 
+        payment_method = str(self.payment_method_combo.currentData() or "cash")
+        customer_name = self.customer_name_input.text().strip()
+        customer_phone = self.customer_phone_input.text().strip()
+
         try:
-            sale_result = self.sales_service.checkout(cart_items)
+            sale_result = self.sales_service.checkout(
+                cart_items,
+                payment_method=payment_method,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+            )
             sale = self.sales_service.sale_details(int(sale_result["sale_id"]))
+            self.show_toast("Bill Generated! Checkout Successful \u2705")
         except ValueError as exc:
+            self.show_toast(str(exc), is_error=True)
             QMessageBox.warning(self, "Checkout Error", str(exc))
             return
         except Exception as exc:
@@ -4398,6 +5198,10 @@ class MainWindow(QMainWindow):
 
         QMessageBox.information(self, "Checkout Complete", message)
         self.clear_cart()
+        self.customer_name_input.clear()
+        self.customer_phone_input.clear()
+        cash_index = self.payment_method_combo.findData("cash")
+        self.payment_method_combo.setCurrentIndex(cash_index if cash_index >= 0 else 0)
         self.refresh_billing_items()
         self.refresh_inventory()
         self.refresh_reports()
@@ -4421,13 +5225,15 @@ class MainWindow(QMainWindow):
     def refresh_reports(self) -> None:
         start_date, end_date = self._iso_range_from_edits(self.report_from_date, self.report_to_date)
         summary = self.report_service.summary_between(start_date=start_date, end_date=end_date)
-        self.sales_value.setText(f"INR {summary['sales']:.2f}")
-        self.cogs_value.setText(f"INR {summary['cogs']:.2f}")
-        self.gross_profit_value.setText(f"INR {summary['gross_profit']:.2f}")
-        self.purchases_value.setText(f"INR {summary['purchases']:.2f}")
-        self.expenses_value.setText(f"INR {summary['expenses']:.2f}")
-        self.fixed_daily_value.setText(f"INR {summary['daily_fixed_overhead']:.2f}")
-        self.net_value.setText(f"INR {summary['net_profit']:.2f}")
+        self.sales_value.setText(self.reports_controller.money(summary["sales"]))
+        self.cogs_value.setText(self.reports_controller.money(summary["cogs"]))
+        self.gross_profit_value.setText(self.reports_controller.money(summary["gross_profit"]))
+        self.purchases_value.setText(self.reports_controller.money(summary["purchases"]))
+        self.expenses_value.setText(self.reports_controller.money(summary["expenses"]))
+        self.fixed_daily_value.setText(self.reports_controller.money(summary["selected_fixed_overhead"]))
+        self.net_value.setText(self.reports_controller.money(summary["net_profit"]))
+        self.reports_controller.apply_profit_state(self.gross_profit_value, summary["gross_profit"])
+        self.reports_controller.apply_profit_state(self.net_value, summary["net_profit"])
 
         fixed = summary.get("fixed_costs", {})
         self.rent_spin.setValue(float(fixed.get("rent", 0)))
@@ -4513,6 +5319,57 @@ class MainWindow(QMainWindow):
                 self._report_item(f"{float(row['sales_value']):.2f}", True),
             )
 
+        if hasattr(self, "payment_breakdown_table"):
+            payment_rows = self.report_service.payment_breakdown_between(start_date=start_date, end_date=end_date)
+            self.payment_breakdown_table.setRowCount(len(payment_rows))
+            for row_index, row in enumerate(payment_rows):
+                self.payment_breakdown_table.setItem(
+                    row_index,
+                    0,
+                    self._report_item(str(row.get("payment_method") or "cash").upper()),
+                )
+                self.payment_breakdown_table.setItem(
+                    row_index,
+                    1,
+                    self._report_item(str(int(row.get("bill_count") or 0)), True),
+                )
+                self.payment_breakdown_table.setItem(
+                    row_index,
+                    2,
+                    self._report_item(f"{float(row.get('amount_total') or 0):.2f}", True),
+                )
+
+        if hasattr(self, "recent_sales_table"):
+            sales_limit = int(self.recent_sales_limit_spin.value()) if hasattr(self, "recent_sales_limit_spin") else 80
+            recent_sales = self.report_service.recent_sales_between(
+                start_date=start_date,
+                end_date=end_date,
+                limit=sales_limit,
+            )
+            self.recent_sales_table.setRowCount(len(recent_sales))
+            for row_index, row in enumerate(recent_sales):
+                self.recent_sales_table.setItem(row_index, 0, self._report_item(str(row.get("invoice_number") or "")))
+                self.recent_sales_table.setItem(row_index, 1, self._report_item(str(row.get("sold_at") or "")))
+                self.recent_sales_table.setItem(
+                    row_index,
+                    2,
+                    self._report_item(str(row.get("payment_method") or "cash").upper()),
+                )
+                self.recent_sales_table.setItem(row_index, 3, self._report_item(str(row.get("customer_name") or "-")))
+                self.recent_sales_table.setItem(row_index, 4, self._report_item(str(row.get("customer_phone") or "-")))
+                self.recent_sales_table.setItem(
+                    row_index,
+                    5,
+                    self._report_item(f"{float(row.get('total_amount') or 0):.2f}", True),
+                )
+
+        if hasattr(self, "waste_summary_label"):
+            waste = self.report_service.waste_summary_between(start_date=start_date, end_date=end_date)
+            self.waste_summary_label.setText(
+                f"Waste in range: Qty {self._f(waste.get('waste_qty')):.2f} | "
+                f"Estimated Cost INR {self._f(waste.get('waste_cost')):.2f}"
+            )
+
         if hasattr(self, "audit_log_table"):
             logs = self.bookkeeping_service.list_audit_logs(limit=500)
             self.audit_log_table.setRowCount(len(logs))
@@ -4548,138 +5405,19 @@ class MainWindow(QMainWindow):
                 self.costing_exceptions_table.setItem(row_index, 5, self._report_item(ex.get("details", "")))
 
     def close_day(self) -> None:
-        selected_date, ok = QInputDialog.getText(
-            self,
-            "Close Day",
-            "Enter date to close (YYYY-MM-DD):",
-            text=date.today().isoformat(),
-        )
-        if not ok:
-            return
-
-        try:
-            result = self.bookkeeping_service.close_day(selected_date.strip())
-        except ValueError as exc:
-            QMessageBox.warning(self, "Close Day", str(exc))
-            return
-        except Exception as exc:
-            QMessageBox.critical(self, "Close Day Error", str(exc))
-            return
-
-        QMessageBox.information(
-            self,
-            "Day Closed",
-            (
-                f"Date: {result['closure_date']}\n"
-                f"Sales: INR {result['sales']:.2f}\n"
-                f"COGS: INR {result['cogs']:.2f}\n"
-                f"Expenses: INR {result['expenses']:.2f}\n"
-                f"Gross: INR {result['gross_profit']:.2f}\n"
-                f"Net: INR {result['net_profit']:.2f}"
-            ),
-        )
-        self._log_audit("day_close", "closure", result["closure_date"], "manual close-day")
+        self.ops_controller.close_day()
 
     def backup_now(self) -> None:
-        try:
-            backup_path = create_backup(db_path=self.db_path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Backup Failed", str(exc))
-            return
-
-        self._log_audit("backup_now", "backup", str(backup_path), "manual backup")
-        QMessageBox.information(self, "Backup Created", f"Backup saved at:\n{backup_path}")
+        self.ops_controller.backup_now()
 
     def export_backup_dialog(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Export Folder")
-        if not folder:
-            return
-
-        try:
-            path = export_backup(destination_dir=folder, db_path=self.db_path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Export Failed", str(exc))
-            return
-
-        self._log_audit("backup_export", "backup", str(path), f"export folder={folder}")
-        QMessageBox.information(self, "Export Complete", f"Backup exported to:\n{path}")
+        self.ops_controller.export_backup_dialog()
 
     def restore_backup_dialog(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Backup File", filter="DB Files (*.db)")
-        if not file_path:
-            return
-
-        pin = self._require_admin_access("Restore Backup")
-        if pin is None:
-            return
-
-        try:
-            current_counts = self.bookkeeping_service.current_database_counts()
-            backup_counts = inspect_backup_counts(file_path)
-            preview = self._format_restore_preview(
-                current_counts=current_counts,
-                backup_counts=backup_counts,
-                backup_file=file_path,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Restore Pre-check Failed", str(exc))
-            return
-
-        confirm = QMessageBox.question(
-            self,
-            "Confirm Restore",
-            preview,
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
-            return
-
-        try:
-            restore_backup(backup_file=file_path, db_path=self.db_path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Restore Failed", str(exc))
-            return
-
-        QMessageBox.information(
-            self,
-            "Restore Complete",
-            "Backup restored. Please restart the application to reload all data safely.",
-        )
-        self._log_audit("backup_restore", "backup", file_path, "restore completed")
+        self.ops_controller.restore_backup_dialog()
 
     def _save_pending_cart(self) -> None:
-        self.cart_file.parent.mkdir(parents=True, exist_ok=True)
-        if not self.cart:
-            self.cart_file.unlink(missing_ok=True)
-            return
-
-        payload = {"items": list(self.cart.values())}
-        self.cart_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.ops_controller.save_pending_cart()
 
     def _load_pending_cart(self) -> None:
-        if not self.cart_file.exists():
-            return
-
-        try:
-            payload = json.loads(self.cart_file.read_text(encoding="utf-8"))
-            items = payload.get("items", [])
-        except Exception:
-            self.cart_file.unlink(missing_ok=True)
-            return
-
-        if not items:
-            self.cart_file.unlink(missing_ok=True)
-            return
-
-        answer = QMessageBox.question(
-            self,
-            "Recover Pending Bill",
-            "Found an unsaved cart from previous session. Restore it?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
-            self.cart_file.unlink(missing_ok=True)
-            return
-
-        self.cart = {int(item["item_id"]): item for item in items}
-        self.refresh_cart_table()
+        self.ops_controller.load_pending_cart()

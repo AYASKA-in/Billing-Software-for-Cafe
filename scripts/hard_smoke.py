@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -129,10 +130,15 @@ def run_hard_smoke(db_path: Path) -> None:
     expense_id = bookkeeping.add_expense("Electricity", 250.0, "smoke expense")
     _assert(expense_id > 0, "Expense not created")
 
-    sale_1 = sales.checkout([
-        {"item_id": item_food, "quantity": 3.0},
-        {"item_id": item_cig, "quantity": 2.0},
-    ])
+    sale_1 = sales.checkout(
+        [
+            {"item_id": item_food, "quantity": 3.0},
+            {"item_id": item_cig, "quantity": 2.0},
+        ],
+        payment_method="upi",
+        customer_name="Walk-in A",
+        customer_phone="9999999999",
+    )
     sale_2 = sales.checkout([
         {"item_id": item_food, "quantity": 1.0},
     ])
@@ -159,6 +165,16 @@ def run_hard_smoke(db_path: Path) -> None:
         "Recipe ingredient deduction mismatch",
     )
 
+    inventory.record_waste(
+        item_id=item_food,
+        quantity=1.0,
+        admin_pin="1234",
+        notes="spillage",
+    )
+    waste_adjusted_item = repo.get_item(item_food)
+    _assert(waste_adjusted_item is not None, "Item missing after waste record")
+    _assert(round(float(waste_adjusted_item["stock_quantity"]), 2) == 55.0, "Waste deduction mismatch")
+
     exceptions = bookkeeping.list_costing_exceptions(limit=50)
     _assert(
         any(
@@ -177,7 +193,7 @@ def run_hard_smoke(db_path: Path) -> None:
     )
     item_after_edit = repo.get_item(item_food)
     _assert(item_after_edit is not None, "Item missing after purchase edit")
-    _assert(round(float(item_after_edit["stock_quantity"]), 2) == 54.0, "Purchase edit stock reconciliation mismatch")
+    _assert(round(float(item_after_edit["stock_quantity"]), 2) == 53.0, "Purchase edit stock reconciliation mismatch")
 
     today = date.today().isoformat()
     purchases = bookkeeping.list_purchases_between(today, today, limit=100)
@@ -186,6 +202,9 @@ def run_hard_smoke(db_path: Path) -> None:
     trend = reports.sales_trend_between(today, today)
     top_items = reports.top_items_between(today, today, limit=10)
     ledger = reports.stock_ledger_between(today, today, limit=500)
+    payment_breakdown = reports.payment_breakdown_between(today, today)
+    recent_sales = reports.recent_sales_between(today, today, limit=20)
+    waste_summary = reports.waste_summary_between(today, today)
 
     _assert(len(purchases) >= 1, "Date-range purchases empty")
     _assert(len(expenses) >= 1, "Date-range expenses empty")
@@ -195,6 +214,9 @@ def run_hard_smoke(db_path: Path) -> None:
     _assert(len(trend) >= 1, "Sales trend empty")
     _assert(len(top_items) >= 1, "Top items empty")
     _assert(len(ledger) >= 1, "Ledger empty")
+    _assert(any((row.get("payment_method") or "") == "upi" for row in payment_breakdown), "UPI breakdown missing")
+    _assert(any((row.get("customer_name") or "") == "Walk-in A" for row in recent_sales), "Recent sale customer missing")
+    _assert(float(waste_summary.get("waste_qty", 0)) >= 1.0, "Waste summary quantity missing")
 
     close_result = bookkeeping.close_day(today)
     _assert(close_result["closure_date"] == today, "Close-day date mismatch")
@@ -225,7 +247,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run hard smoke regression test suite")
     parser.add_argument(
         "--db",
-        default="data/smoke_hard_tmp.db",
+        default=str(Path(tempfile.gettempdir()) / "cafe_pos_smoke_hard_tmp.db"),
         help="Temporary database path for smoke test execution",
     )
     parser.add_argument(

@@ -1,0 +1,6 @@
+﻿Cafe POS Release
+Version: 1.2.3
+Created: 2026-04-28T10:07:01
+Portable ZIP: D:\software for cafe\release\v1.2.3\CafePOS-v1.2.3-win64.zip
+Installer: 
+D:\software for cafe\release\v1.2.3\CafePOS-v1.2.3-setup.exe

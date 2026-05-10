@@ -5,11 +5,13 @@ __pycache__/
 
 # Local runtime data and exports
 *.db
+*.db-journal
 *.sqlite
 *.sqlite3
 *.log
 reports_*.csv
 cafe_backup_*.db
+data/*.png
 data/backups/
 data/printed_bills/
 
@@ -22,6 +24,12 @@ release/
 # Client delivery binaries (docs stay tracked)
 client-delivery/**/*.exe
 client-delivery/**/*.zip
+client-delivery/**/package/
+client-delivery/**/release-artifacts/dist/
+client-delivery/**/release-artifacts/build/
+client-delivery/**/release-artifacts/*.zip
+client-delivery/**/release-artifacts/*.exe
+Screenshot *.png
 
 # Local editor/system files
 .vscode/

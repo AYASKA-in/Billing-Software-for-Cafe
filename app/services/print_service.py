@@ -20,6 +20,11 @@ class PrintService:
         lines.append(f"Invoice: {invoice_number}")
         lines.append(f"Sale ID: {bill_payload.get('sale_id')}")
         lines.append(f"Date: {bill_payload.get('sold_at', 'N/A')}")
+        lines.append(f"Payment: {str(bill_payload.get('payment_method') or 'cash').upper()}")
+        if bill_payload.get("customer_name"):
+            lines.append(f"Customer: {bill_payload.get('customer_name')}")
+        if bill_payload.get("customer_phone"):
+            lines.append(f"Phone: {bill_payload.get('customer_phone')}")
         lines.append("")
 
         for item in bill_payload.get("items", []):

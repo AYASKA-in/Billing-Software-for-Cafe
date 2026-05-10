@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.database.repository import Repository
+from app.dto import PurchaseLineDTO
 
 
 class BookkeepingService:
@@ -10,8 +11,7 @@ class BookkeepingService:
         self.repo = repo
 
     def verify_admin_pin(self, pin: str) -> bool:
-        configured_pin = self.repo.get_setting("admin_pin", "1234")
-        return pin == configured_pin
+        return self.repo.verify_admin_pin(pin)
 
     def add_expense(self, expense_type: str, amount: float, notes: str = "") -> int:
         if not expense_type.strip():
@@ -20,15 +20,19 @@ class BookkeepingService:
             raise ValueError("Expense amount must be greater than zero.")
         return self.repo.create_expense(expense_type=expense_type, amount=amount, notes=notes)
 
-    def add_purchase(self, supplier_name: str, items: list[dict], notes: str = "") -> int:
+    def add_purchase(self, supplier_name: str, items: list[dict] | list[PurchaseLineDTO], notes: str = "") -> int:
         if not items:
             raise ValueError("Purchase must contain at least one item.")
-        for item in items:
+        normalized_items = [
+            item.as_dict() if isinstance(item, PurchaseLineDTO) else item
+            for item in items
+        ]
+        for item in normalized_items:
             if float(item.get("quantity", 0)) <= 0:
                 raise ValueError("Purchase quantity must be greater than zero.")
             if float(item.get("cost_price", 0)) < 0:
                 raise ValueError("Cost price cannot be negative.")
-        return self.repo.create_purchase(supplier_name=supplier_name, items=items, notes=notes)
+        return self.repo.create_purchase(supplier_name=supplier_name, items=normalized_items, notes=notes)
 
     def get_purchase_for_edit(self, purchase_id: int, admin_pin: str) -> dict:
         if not self.verify_admin_pin(admin_pin):
@@ -44,7 +48,7 @@ class BookkeepingService:
         self,
         purchase_id: int,
         supplier_name: str,
-        items: list[dict],
+        items: list[dict] | list[PurchaseLineDTO],
         notes: str,
         admin_pin: str,
     ) -> None:
@@ -52,7 +56,11 @@ class BookkeepingService:
             raise ValueError("Invalid admin PIN.")
         if not items:
             raise ValueError("Purchase must contain at least one item.")
-        for item in items:
+        normalized_items = [
+            item.as_dict() if isinstance(item, PurchaseLineDTO) else item
+            for item in items
+        ]
+        for item in normalized_items:
             if float(item.get("quantity", 0)) <= 0:
                 raise ValueError("Purchase quantity must be greater than zero.")
             if float(item.get("cost_price", 0)) < 0:
@@ -61,7 +69,7 @@ class BookkeepingService:
         self.repo.update_purchase(
             purchase_id=purchase_id,
             supplier_name=supplier_name,
-            items=items,
+            items=normalized_items,
             notes=notes,
         )
 

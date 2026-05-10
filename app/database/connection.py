@@ -5,8 +5,12 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+from app.security import hash_pin
+
 
 class Database:
+    SCHEMA_VERSION = 1
+
     def __init__(self, db_path: str = "data/cafe.db") -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,6 +54,16 @@ class Database:
             conn.commit()
 
     def _run_migrations(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
         sale_item_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(sale_items)").fetchall()
         }
@@ -57,6 +71,16 @@ class Database:
             conn.execute(
                 "ALTER TABLE sale_items ADD COLUMN unit_cost REAL NOT NULL DEFAULT 0 CHECK (unit_cost >= 0)"
             )
+
+        sales_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(sales)").fetchall()
+        }
+        if "payment_method" not in sales_columns:
+            conn.execute("ALTER TABLE sales ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'")
+        if "customer_name" not in sales_columns:
+            conn.execute("ALTER TABLE sales ADD COLUMN customer_name TEXT")
+        if "customer_phone" not in sales_columns:
+            conn.execute("ALTER TABLE sales ADD COLUMN customer_phone TEXT")
 
         items_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(items)").fetchall()
@@ -185,9 +209,24 @@ class Database:
         conn.execute(
             "INSERT OR IGNORE INTO app_settings (setting_key, setting_value) VALUES ('invoice_prefix', 'CAFE')"
         )
-        conn.execute(
-            "INSERT OR IGNORE INTO app_settings (setting_key, setting_value) VALUES ('admin_pin', '1234')"
-        )
+        pin_hash_row = conn.execute(
+            "SELECT setting_value FROM app_settings WHERE setting_key = 'admin_pin_hash'"
+        ).fetchone()
+        if pin_hash_row is None:
+            legacy_pin_row = conn.execute(
+                "SELECT setting_value FROM app_settings WHERE setting_key = 'admin_pin'"
+            ).fetchone()
+            legacy_pin = legacy_pin_row["setting_value"] if legacy_pin_row else "1234"
+            conn.execute(
+                """
+                INSERT INTO app_settings (setting_key, setting_value)
+                VALUES ('admin_pin_hash', ?)
+                ON CONFLICT(setting_key)
+                DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP
+                """,
+                (hash_pin(legacy_pin),),
+            )
+            conn.execute("DELETE FROM app_settings WHERE setting_key = 'admin_pin'")
         conn.execute(
             "INSERT OR IGNORE INTO app_settings (setting_key, setting_value) VALUES ('current_role', 'cashier')"
         )
@@ -197,6 +236,14 @@ class Database:
         conn.execute(
             "INSERT OR IGNORE INTO app_settings (setting_key, setting_value) VALUES ('backup_interval_minutes', '60')"
         )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO schema_migrations (version, name)
+            VALUES (?, ?)
+            """,
+            (self.SCHEMA_VERSION, "baseline_schema_with_hashed_admin_pin"),
+        )
+        conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     @contextmanager
     def transaction(self):

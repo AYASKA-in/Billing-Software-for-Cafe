@@ -1,0 +1,28 @@
+{
+  "dependencies": {
+    "@heyputer/puter.js": "^2.2.15",
+    "openai": "^6.35.0"
+  },
+  "name": "software-for-cafe",
+  "version": "1.0.0",
+  "description": "Open-source offline Windows desktop POS for cafe operations, bookkeeping, reporting, and safe local backups.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AYASKA-in/Billing-Software-for-Cafe.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/AYASKA-in/Billing-Software-for-Cafe/issues"
+  },
+  "homepage": "https://github.com/AYASKA-in/Billing-Software-for-Cafe#readme"
+}

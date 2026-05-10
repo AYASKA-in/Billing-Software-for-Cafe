@@ -44,14 +44,16 @@ class ReportService:
         summary = self.repo.get_summary_between(start_date=start_date, end_date=end_date)
         fixed = self.get_monthly_fixed_costs()
         monthly_fixed_total = fixed["rent"] + fixed["salary"] + fixed["maintenance"] + fixed["electricity"]
-        days_in_month = calendar.monthrange(date.today().year, date.today().month)[1]
-        daily_fixed_overhead = monthly_fixed_total / days_in_month if days_in_month > 0 else 0.0
         try:
             start_obj = date.fromisoformat(start_date)
             end_obj = date.fromisoformat(end_date)
             days_selected = abs((end_obj - start_obj).days) + 1
+            # Use the month from the start of the selected range, not always today
+            days_in_month = calendar.monthrange(start_obj.year, start_obj.month)[1]
         except ValueError:
             days_selected = 1
+            days_in_month = calendar.monthrange(date.today().year, date.today().month)[1]
+        daily_fixed_overhead = monthly_fixed_total / days_in_month if days_in_month > 0 else 0.0
         total_fixed_overhead = daily_fixed_overhead * float(days_selected)
 
         summary["gross_profit"] = summary["sales"] - summary["cogs"]
@@ -60,6 +62,7 @@ class ReportService:
         summary["selected_days"] = days_selected
         summary["selected_fixed_overhead"] = total_fixed_overhead
         summary["monthly_fixed_total"] = monthly_fixed_total
+        # Net profit = (sales - cogs - expenses) minus the total fixed overhead for the selected period
         summary["net_profit"] = summary["net_profit_before_fixed"] - total_fixed_overhead
         summary["fixed_costs"] = fixed
         return summary
@@ -90,6 +93,15 @@ class ReportService:
 
     def top_items_between(self, start_date: str, end_date: str, limit: int = 10) -> list[dict]:
         return self.repo.top_selling_items_between(start_date=start_date, end_date=end_date, limit=limit)
+
+    def payment_breakdown_between(self, start_date: str, end_date: str) -> list[dict]:
+        return self.repo.sales_payment_breakdown_between(start_date=start_date, end_date=end_date)
+
+    def recent_sales_between(self, start_date: str, end_date: str, limit: int = 200) -> list[dict]:
+        return self.repo.recent_sales_between(start_date=start_date, end_date=end_date, limit=limit)
+
+    def waste_summary_between(self, start_date: str, end_date: str) -> dict:
+        return self.repo.waste_summary_between(start_date=start_date, end_date=end_date)
 
     def costing_exceptions(self, limit: int = 200) -> list[dict]:
         return self.repo.list_costing_exceptions(limit=limit)
