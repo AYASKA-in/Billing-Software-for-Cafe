@@ -33,8 +33,12 @@ class PrintService:
         lines.append("")
 
         for item in bill_payload.get("items", []):
+            name = item.get('name', 'Unknown Item')
+            qty = float(item.get('quantity', 0))
+            unit_price = float(item.get('unit_price', 0))
+            line_total = float(item.get('line_total', 0))
             lines.append(
-                f"{item['name']} x {item['quantity']:.2f} @ {item['unit_price']:.2f} = {item['line_total']:.2f}"
+                f"{name} x {qty:.2f} @ {unit_price:.2f} = {line_total:.2f}"
             )
 
         lines.append("------------------------------")

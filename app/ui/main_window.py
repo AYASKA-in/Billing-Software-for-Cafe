@@ -5261,8 +5261,8 @@ class MainWindow(QMainWindow):
             sale_payload = None
             for sale_row in sales:
                 if sale_row.get("invoice_number") == invoice_number:
-                    # Get full sale details
-                    sale_payload = self.sales_service.sale_details(int(sale_row["sale_id"]))
+                    # Get full sale details (sale_row has 'id', not 'sale_id')
+                    sale_payload = self.sales_service.sale_details(int(sale_row["id"]))
                     break
             
             if not sale_payload:
